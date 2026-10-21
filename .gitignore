@@ -1,0 +1,70 @@
+# Git ignore for three-tool-sast-runner
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+
+# Build and compilation
+build/
+Debug/
+Release/
+cmake-build-*/
+compile_commands.json
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+
+# Cppcheck internal cache
+cppcheck-build/
+
+# Scan outputs & run artifacts
+work/
+scan_output/
+*_scan_results*/
+*.zip
+*.tar
+*.tar.gz
+*.plist
+fixes/
+logs/
+
+# IDE & OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

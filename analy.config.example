@@ -1,0 +1,7 @@
+# three-tool-sast-runner 配置文件示例
+# 相对路径以 analy.config 所在目录为基准
+
+SCAN_CODE_DIR=../..            # 必填：要扫描的代码根目录
+WORK_DIR=scan_output           # 必填：结果与中间产物输出目录
+BUILD_DIR=../../build          # 必填：compile_commands.json 所在目录
+SCAN_SUBDIRS=src,include       # 可选：逗号分隔的子目录，留空自动探测
