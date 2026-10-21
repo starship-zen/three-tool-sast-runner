@@ -1,5 +1,7 @@
 # three-tool-sast-runner
 
+[ English ](README.md) • [ 简体中文 ](README.zh-CN.md)
+
 Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, and **Clang Static Analyzer (CSA)** to produce standardized, auditable evidence packages for industrial control software and IEC 62443 compliance.
 
 > **Current Repository Status:** `v1.0 Specification & Interface Contract Baseline`  
@@ -15,7 +17,7 @@ Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, an
 3. Format outputs into a strictly layered, immutable evidence bundle (`[RAW]` diagnostics, `[RECEIPT]` execution receipts, `[CACHE]` states, and `[DERIVED]` summaries).
 4. Generate a self-describing bundle complying with the `three-tool-input-1.0` contract, ready for downstream offline report generation (mapping to CWE Top 25:2025, OWASP Top 10:2025, and Critical/High/Medium/Low audit risk ratings).
 
-For the full architectural specification and interface contract, see [docs/SPEC.md](docs/SPEC.md).
+For the full architectural specification and interface contract, see [docs/SPEC.md](docs/SPEC.md) (English) or [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md) (中文).
 
 ---
 

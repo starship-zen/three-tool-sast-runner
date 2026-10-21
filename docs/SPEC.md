@@ -1,5 +1,7 @@
 # Three-Tool Scanner Suite Evidence & Input Contract (v1.2)
 
+[ English ](SPEC.md) • [ 简体中文 ](SPEC.zh-CN.md)
+
 > **Document Type:** Engineering Specification & Interface Contract  
 > **Target Audience:** Developers building and maintaining the automated on-host scan runner.  
 > **Downstream Consumer:** Offline Three-Tool Report Generator (`three_tool_report.py`).
