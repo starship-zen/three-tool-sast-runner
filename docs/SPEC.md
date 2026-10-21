@@ -112,10 +112,11 @@ The primary objective is to produce an **immutable, self-contained, auditable ev
 ### 5.2 Cppcheck Contract (`03-cppcheck/`)
 - **Native Invocation (`[RAW]`):**
   Must run with compilation database: `--project=compile_commands.json --xml --xml-version=2 2> result/cppcheck-compile-report.xml`.
+  * **Empirical Engine Rule:** When a Translation Unit or batch has **0 findings, Cppcheck outputs a valid XML v2 structure** containing `<results version="2"><cppcheck .../><errors></errors></results>`. An empty or zero-byte XML file is an invalid execution failure.
 - **Cache Persistence (`[CACHE]`):**
   Must specify `--cppcheck-build-dir=cppcheck-build` to enable persistent caching and avoid redundant re-parsing.
-- **Audit Receipts (`[RECEIPT]`):**
-  Record exact command line in `command.txt`, process exit code in `exit-code.txt`, and binary version in `version.txt`.
+- **Audit Receipts (`[RECEIPT]` & `[DERIVED]`):**
+  Record exact command line in `command.txt`, process exit code in `exit-code.txt`, binary version in `version.txt`, and file list in `input-files.csv` (`[RECEIPT]`). `summary.json` is a post-processed severity count (`[DERIVED]`).
 
 ### 5.3 Clang-Tidy Contract (`04-clang-tidy/`)
 - **Native Diagnostics (`[RAW]`):**
@@ -163,8 +164,8 @@ Before packaging or publishing a scan drop, the runner's self-test must verify:
 | Check Category | Verification Requirement | Failure Impact |
 | :--- | :--- | :--- |
 | **Product Isolation** | Bundle contains only modules of the designated product | Downstream rejection; cannot certify product |
-| **TU Identity Parity** | `selected-tus.txt` set == `clang-tidy-summary.json.files` set == `tu-mapping.csv.file` set == CSA analysis targets | Coverage mismatch; reconciliation failure |
-| **Raw Evidence Integrity** | `cppcheck-compile-report.xml` > 0 bytes; `.yaml` count matches warning TUs; `.plist` count == TU count | Classified as Unverified |
+| **TU Identity Parity** | `compile-db-selected-tus.txt` set == `cppcheck-artifacts/input-files.csv` set == `clang-tidy-summary.json.files` set == `tu-mapping.csv.file` set == CSA analysis targets | Coverage mismatch; reconciliation failure |
+| **Raw Evidence Integrity** | `cppcheck-compile-report.xml` is valid XML v2; `.yaml` count matches warning TUs; `.plist` count == TU count | Classified as Unverified |
 | **Commit Traceability** | `code-state.txt` commit is a valid 40-character SHA-1 (not empty / not recorded) | Audit traceability failure |
 
 ---

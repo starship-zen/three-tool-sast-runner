@@ -2,88 +2,71 @@
 
 Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, and **Clang Static Analyzer (CSA)** to produce standardized, auditable evidence packages for industrial control software and IEC 62443 compliance.
 
+> **Current Repository Status:** `v1.0 Specification & Interface Contract Baseline`  
+> This repository currently defines the authoritative interface contract, evidence schema, and directory layout. The runner scripts and CLI tooling (`scan_all.sh`, `preflight.sh`, `verify.sh`) are actively being implemented and integrated by the engineering team.
+
 ---
 
 ## 1. Overview
 
-`three-tool-sast-runner` provides a turnkey on-host scanner automation suite that:
-1. Discovers target Translation Units (TUs) from CMake `compile_commands.json`.
-2. Runs **Cppcheck (2.22+)**, **Clang-Tidy (LLVM 14+)**, and **Clang Static Analyzer (LLVM 14+)** on the exact same commit and compile database.
-3. Formats outputs into a strictly layered, immutable evidence bundle (`[RAW]` diagnostics, `[RECEIPT]` execution receipts, `[CACHE]` states, and `[DERIVED]` summaries).
-4. Generates a self-describing `manifest.json` complying with the `three-tool-input-1.0` contract, ready for downstream offline report generation (mapping to CWE Top 25:2025, OWASP Top 10:2025, and Critical/High/Medium/Low audit risk ratings).
+`three-tool-sast-runner` defines a turnkey on-host scanner automation suite designed to:
+1. Discover target Translation Units (TUs) from CMake `compile_commands.json`.
+2. Run **Cppcheck (2.22+)**, **Clang-Tidy (LLVM 14+)**, and **Clang Static Analyzer (LLVM 14+)** on the exact same commit and compile database.
+3. Format outputs into a strictly layered, immutable evidence bundle (`[RAW]` diagnostics, `[RECEIPT]` execution receipts, `[CACHE]` states, and `[DERIVED]` summaries).
+4. Generate a self-describing bundle complying with the `three-tool-input-1.0` contract, ready for downstream offline report generation (mapping to CWE Top 25:2025, OWASP Top 10:2025, and Critical/High/Medium/Low audit risk ratings).
 
 For the full architectural specification and interface contract, see [docs/SPEC.md](docs/SPEC.md).
 
 ---
 
-## 2. Directory Structure
+## 2. Target Directory Structure
 
 ```text
 three-tool-sast-runner/
-├── README.md               # Quickstart and overview
+├── README.md               # Quickstart and project status
 ├── docs/
 │   └── SPEC.md             # Full interface contract & empirical engine rules
 ├── analy.config.example    # Configuration template
-├── scan_all.sh             # Master execution script
-├── preflight.sh            # Environment dependency preflight check
-├── verify.sh               # End-to-end smoke test on a synthetic project
-├── scripts/                # Helper utilities and environment capture
+├── scan_all.sh             # [Target Script] Master execution runner
+├── preflight.sh            # [Target Script] Host dependency preflight check
+├── verify.sh               # [Target Script] End-to-end smoke test on a synthetic project
+├── scripts/                # [Target Scripts] Helper utilities and environment capture
 │   ├── analy_config.sh
 │   └── collect_acceptance_env.sh
-├── cpp_check/              # Cppcheck wrapper and source build
+├── cpp_check/              # [Target Module] Cppcheck wrapper and source build
 │   ├── scan.sh
 │   └── scripts/
-├── clang_tidy/             # Clang-Tidy parallel runner
+├── clang_tidy/             # [Target Module] Clang-Tidy parallel runner
 │   ├── scan.sh
 │   └── scripts/
-└── clang_static_analyzer/  # CSA per-TU runner with native Plist output
+└── clang_static_analyzer/  # [Target Module] CSA per-TU runner with native Plist output
     ├── scan.sh
     └── scripts/
 ```
 
 ---
 
-## 3. Quick Start
-
-### 3.1 Preflight Check
-Verify host dependencies (Bash, Python 3, CMake, Clang, Clang-Tidy, Cppcheck):
-```bash
-bash preflight.sh
-```
-
-### 3.2 Smoke Test
-Run an end-to-end dry run on a temporary synthetic project:
-```bash
-bash verify.sh
-```
-
-### 3.3 Configure & Run Scan
-1. Copy `analy.config.example` to `analy.config`:
-   ```bash
-   cp analy.config.example analy.config
-   ```
-2. Configure your project paths:
-   ```bash
-   SCAN_CODE_DIR=/path/to/source/root
-   WORK_DIR=/path/to/output/directory
-   BUILD_DIR=/path/to/cmake/build   # contains compile_commands.json
-   SCAN_SUBDIRS=src,include         # optional, scans all if empty
-   ```
-3. Run the scan suite:
-   ```bash
-   bash scan_all.sh
-   ```
-
----
-
-## 4. Output Artifacts Classification
+## 3. Four-Tier Artifact Classification
 
 | Layer Marker | Description | Producer | Role in Downstream Report Generator |
 | :--- | :--- | :--- | :--- |
-| **`[RAW]`** | XML v2, YAML fixes, Plist | Analyzer binary | Consumed directly as ground truth evidence |
-| **`[RECEIPT]`** | CLI args, exit codes, TU mappings, summary.json | Runner orchestrator | Proves clean execution, scope, and coverage |
-| **`[CACHE]`** | AST caches (`cppcheck-build`) | Analyzer binary | Performance optimization |
-| **`[DERIVED]`** | HTML reports, Markdown summaries | Helper scripts | Human developer quick-view only |
+| **`[RAW]`** | XML v2, YAML fixes, Plist | Analyzer binary directly | Consumed directly as ground truth evidence |
+| **`[RECEIPT]`** | CLI args, exit codes, TU mappings, execution status JSON | Runner orchestrator | Proves clean execution, scope, and coverage |
+| **`[CACHE]`** | AST caches (`cppcheck-build/`) | Analyzer binary | Performance optimization; not evaluated as reports |
+| **`[DERIVED]`** | HTML reports, Markdown summaries, severity distribution summaries | Helper scripts | Human developer quick-view only |
+
+---
+
+## 4. Key Engine Behaviors & Zero-Result Contracts
+
+1. **Cppcheck:** 
+   * When 0 findings are detected, native execution produces a valid XML v2 structure containing `<results version="2"><cppcheck .../><errors></errors></results>`.
+2. **Clang-Tidy:**
+   * When 0 diagnostics are detected, Clang-Tidy **does not write any YAML file**.
+   * Completeness is proven via `clang-tidy-summary.json`'s `files` array (`status: ok`, `unique_diagnostics: 0`), not by matching YAML file count to TU count.
+3. **Clang Static Analyzer:**
+   * When 0 bugs are detected, Clang **still outputs a valid empty Plist file** (with `<key>diagnostics</key><array></array>`).
+   * Exactly $N$ Plist files must exist for the $N$ selected TUs, mapped via `tu-mapping.csv`.
 
 ---
 
