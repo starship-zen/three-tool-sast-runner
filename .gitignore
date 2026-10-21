@@ -41,6 +41,10 @@ compile_commands.json
 *.so
 *.dylib
 
+# Configuration & local overrides
+analy.config
+*.local.config
+
 # Cppcheck internal cache
 cppcheck-build/
 
