@@ -72,3 +72,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Worktrees
+.worktrees/
+
