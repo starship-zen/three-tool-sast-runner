@@ -120,8 +120,15 @@ Multiple paths do not establish business-product isolation.
 offline installer. Prepare analyzers, Python dependencies and build resources
 before disconnected use. Exit 0 is execution success, not release approval;
 exit 1 is an execution/report failure, 2 an input error, 3 an evidence-gate
-failure after successful execution, and 130 cancellation. The synthetic smoke
+failure after successful execution, 130 SIGINT cancellation, and 143 SIGTERM
+cancellation. Both cancellation paths stop active child process groups. The synthetic smoke
 test has its own fixture result and does not certify a product or source baseline.
+
+CSA strips `-save-temps` output options, including forwarded forms, so analysis
+does not retain those build-output side effects. External Clang `--config`,
+`--config-user-dir` and `--config-system-dir` inputs are rejected because their
+contents are not captured in the dependency baseline. Expand the approved
+arguments into `compile_commands.json` before scanning; do not suppress the gate.
 
 ## 6. Product-scoped delivery
 

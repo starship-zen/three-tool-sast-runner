@@ -115,8 +115,13 @@ uv run --frozen python scan/handoff.py export \
 
 `install/install_all.sh` 可能调用 apt 或下载软件包，不是完整离线安装器。断网运行前须先
 准备分析器、Python 依赖和构建资源。退出码 0 表示执行成功，不代表发布批准；1 表示执行或
-报告失败，2 表示输入错误，3 表示执行成功但证据门禁失败，130 表示取消。冒烟测试另有样例
+报告失败，2 表示输入错误，3 表示执行成功但证据门禁失败，130 表示 SIGINT 取消，
+143 表示 SIGTERM 取消；两种取消均清理活动子进程组。冒烟测试另有样例
 验证结果，不能认证产品或源码基线。
+
+CSA 会移除 `-save-temps` 及转发形式的构建输出参数，避免保留这类写文件副作用。
+外部 Clang `--config`、`--config-user-dir` 和 `--config-system-dir` 尚未纳入依赖基线，
+因此明确拒绝；请先将经确认的参数展开到 `compile_commands.json`，不要绕过证据门禁。
 
 ---
 

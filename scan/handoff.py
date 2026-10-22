@@ -847,11 +847,19 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
         for unit, source_relative in validated["tidy_yaml"].items():
             record = copy_evidence(source_relative, "native/clang-tidy/" + hashlib.sha256(unit.encode()).hexdigest()[:20] + ".yaml",
                                    "native-scanner-output", tool="clang-tidy", analysis_unit=unit)
+            logs = []
+            for stream, suffix in (("stdout", "out"), ("stderr", "err")):
+                source_log = "04-clang-tidy/result/logs/" + hashlib.sha256(unit.encode()).hexdigest()[:20] + "." + suffix + ".log"
+                if source_log in validated["evidence_files"]:
+                    log = copy_evidence(source_log, "provenance/runner-evidence/" + source_log,
+                                        "native-diagnostic-log", tool="clang-tidy", analysis_unit=unit, stream=stream)
+                    logs.append({"path": log["path"], "sha256": log["sha256"], "stream": stream})
             artifacts.append({
                 "path": record["path"], "sha256": record["sha256"], "tool": "clang-tidy",
                 "format": FORMATS["clang-tidy"], "tool_version": versions["clang-tidy"],
                 "component": component, "configuration": configuration, "target": target_id,
                 "analysis_unit": unit,
+                **({"diagnostic_logs": logs} if logs else {}),
             })
         for unit in units:
             source_relative = "05-clang-static-analyzer/result/csa-native/" + hashlib.sha256(unit.encode()).hexdigest()[:20] + ".plist"

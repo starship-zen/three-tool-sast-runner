@@ -19,6 +19,17 @@ def resolve_tools():
     return {name: common.find_tool(name, common.llvm_candidates(name)) for name in REQUIRED_TOOLS}
 
 
+def discard_side_effect_option(token):
+    option, separator, value = token.partition("=")
+    if option in ("--config", "--config-user-dir", "--config-system-dir"):
+        raise ValueError("CSA does not capture external Clang config files; expand their arguments in compile_commands.json: " + token)
+    if option in ("-save-temps", "--save-temps"):
+        if separator and value not in ("cwd", "obj"):
+            raise ValueError("Unsupported save-temps mode: " + token)
+        return True
+    return False
+
+
 def clean_forwarded(arguments):
     output_options = {"-o", "-MF", "-MT", "-MQ", "-MJ", "-dependency-file", "-dependency-dot",
                       "-serialize-diagnostics", "--serialize-diagnostics", "-serialize-diagnostic-file", "-diagnostic-log-file"}
@@ -31,6 +42,9 @@ def clean_forwarded(arguments):
         token = arguments[position]
         if token.startswith("@"):
             raise ValueError("CSA requires expanded response files in compile_commands.json: " + token)
+        if discard_side_effect_option(token):
+            position += 1
+            continue
         if token in output_options | value_options:
             if position + 1 >= len(arguments):
                 raise ValueError("Missing forwarded compiler option value: " + token)
@@ -56,13 +70,17 @@ def compiler_arguments(entry):
     tokens = list(entry["arguments"])
     if Path(tokens[0]).name in ("ccache", "sccache"):
         tokens.pop(0)
-    tokens = tokens[1:]
+    tokens = [part for token in tokens[1:]
+              for part in (("-Xclang", token.split("=", 1)[1]) if token.startswith("-Xclang=") else (token,))]
     result = []
     position = 0
     while position < len(tokens):
         token = tokens[position]
         if token.startswith("@"):
             raise ValueError("CSA requires expanded response files in compile_commands.json: " + token)
+        if discard_side_effect_option(token):
+            position += 1
+            continue
         if token == "--":
             position += 1
             continue

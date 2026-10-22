@@ -40,6 +40,7 @@ def render_reports(scanners, group, folder, entries, scopes, binaries):
         raise ValueError("; ".join(errors))
 
 
+@common.cancellation_signals()
 def run(paths, result_path, scanners):
     common.CANCELLED.clear()
     groups = common.plan(paths, source_fallback=True)
@@ -55,10 +56,12 @@ def run(paths, result_path, scanners):
     common.write_json(run_path / "manifest.json", manifest)
     try:
         return complete_run(paths, result_path, scanners, groups, binaries, run_path, manifest)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as error:
         common.cancel_processes()
         manifest["cancelled"] = True
         manifest["ok"] = False
+        manifest["exit_code"] = common.cancellation_exit_code(error)
+        manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         common.write_json(run_path / "manifest.json", manifest)
         raise
     except (OSError, ValueError, TypeError) as error:
@@ -112,9 +115,10 @@ def complete_run(paths, result_path, scanners, groups, binaries, run_path, manif
                     receipt = scanner.scan(entries, scopes, selected_database, group_path / scanner.NAME, binaries)
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 receipt = {"ok": False, "error": str(error)}
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as error:
                 common.cancel_processes()
-                group["results"][scanner.NAME] = {"ok": False, "status": "cancelled", "exit_code": 130}
+                group["results"][scanner.NAME] = {"ok": False, "status": "cancelled",
+                                                  "exit_code": common.cancellation_exit_code(error)}
                 manifest["cancelled"] = True
                 common.write_json(run_path / "manifest.json", manifest)
                 raise
@@ -162,10 +166,10 @@ def main(scanners, argv=None):
     try:
         paths, result_path = common.inputs(sys.argv[1:] if argv is None else argv)
         return run(paths, result_path, scanners)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as error:
         common.cancel_processes()
         print("扫描已取消，子进程组已终止。", file=sys.stderr)
-        return 130
+        return common.cancellation_exit_code(error)
     except (OSError, ValueError, TypeError) as error:
         print("error: " + str(error), file=sys.stderr)
         return 2

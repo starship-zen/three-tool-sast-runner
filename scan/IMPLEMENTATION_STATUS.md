@@ -107,3 +107,40 @@ inputs plus pinned toolchain/build resources and validation on a clean host.
 
 `release_ready` remains false. The release gate lists these pending dependencies
 explicitly; a passing unit suite, a cache hit or exit code 0 is not certification.
+
+## 6. Review Repairs: Isolated C/C++ Acceptance
+
+The October 22 review follow-up removes direct/forwarded `-save-temps` options
+that could overwrite existing preprocessed files, rejects external Clang
+`--config*` options rather than using unbound compiler semantics, and handles
+SIGTERM through scanner process-group cleanup with cancellation receipts
+(exit 143; SIGINT remains 130). Operators must expand approved external config
+arguments into `compile_commands.json`. This is not a general sandbox for
+arbitrary compiler plugins or untrusted source builds.
+
+Tidy handoff artifacts now optionally bind original stdout/stderr logs for
+downstream coordinate corroboration. Native YAML is unchanged; no log means
+no promise of recovered line/column. The receiver independently reconciles
+declared/native counts and retains relative source labels; reporter mapping
+and release policy stay outside this runner.
+
+The repaired working tree passed 166 tests in isolated Ubuntu 24.04 ARM64
+with LLVM 18.1.3 and Cppcheck 2.22.0. All source scans used network isolation
+and no host mounts. Positive and zero cases ran/exported successfully;
+missing-header and external-config cases failed and refused export. Real
+three-tool save-temps probes preserved pre-existing `.i/.ii` files. Signals
+sent while native clang-tidy was active produced 143/130 cancellation receipts,
+no active analyzer-group survivors and export refusal.
+
+The matching reporter working tree ran 368 tests (one optional environment
+skip) and separately accepted the relocated native positive/zero deliveries.
+The positive sample contained ten native records, nine code observations and
+one auxiliary record, with zero mapping gaps. Both samples passed strict
+audit, generation, candidate verification and packing; the positive ZIP also
+passed a fresh temporary HTTP import/job. Neither received release approval.
+
+Local evidence: `/tmp/runner-fix-native-20261022-JLsjo3/NATIVE-VALIDATION-RECEIPT.txt`
+and `/private/tmp/sast-review-integrated-20261022.hf_jf2yw/review-acceptance.json`.
+These are ephemeral verification artifacts, not committed customer deliveries.
+This slice did not rerun business or C# sources, test other architectures/tool
+versions, inspect PDF layout, install on the dedicated host or restart services.

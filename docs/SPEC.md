@@ -331,12 +331,25 @@ directories are retained. `CPPCHECK_CLEAN_AFTER_BUILD=0` disables cleanup.
 Derived HTML escapes untrusted text/attributes without changing native evidence
 or the filesystem paths used to read source files.
 
+The shared CSA/dependency argument sanitizer removes direct and forwarded
+`-save-temps[=cwd|obj]` / `--save-temps` options; unknown modes fail rather than
+being silently accepted. It rejects external `--config`, `--config-user-dir`
+and `--config-system-dir` inputs until their contents can be captured. Operators
+must expand approved arguments in the compile database. This is not a sandbox
+or a claim that every possible compiler extension has no filesystem effects.
+
 ### 8.4 Validation and Errors
 
 Malformed/unknown configuration or conflicting compile contexts raises an input
 error (main CLI exit 2), before a scan run is created. A cleanup path that cannot
 be proven safe is kept, not recursively removed. Missing YAML validation support
 cannot be reported as verified evidence; provision PyYAML from `requirements.txt`.
+
+SIGINT returns 130; SIGTERM returns 143. The main-thread run installs/restores
+its SIGTERM handler and uses the common cancellation path to stop/reap active
+process groups. If a run manifest exists, record `cancelled:true`, `ok:false`,
+the cancellation exit code and completion time; an active scanner also gets a
+cancelled receipt. A cancelled run is not exportable as a completed scan.
 
 ### 8.5 Good, Base and Bad Cases
 
@@ -352,6 +365,11 @@ contexts and ordering, rejection before scan creation, installer-owned versus
 caller-owned/symlinked paths, HTML index/detail/statistics escaping, and loading
 the shipped configuration template with the real parser. Stub-driven tests do
 not establish real analyzer or downstream acceptance.
+
+`tests/test_execution_boundaries.py` additionally checks direct/forwarded flags,
+external-config rejection before CSA execution, real-Clang preservation of a
+pre-existing `sample.i`, active serial/threaded child cleanup on SIGTERM and
+handler restoration. Existing SIGINT and timeout tests must continue to pass.
 
 ### 8.7 Wrong versus Correct
 

@@ -158,6 +158,12 @@ class HandoffExportTests(unittest.TestCase):
                             "    Replacements: []\n").encode()
                 (evidence_root / "04-clang-tidy/result/fixes" / (slugs[unit] + ".yaml")).parent.mkdir(parents=True, exist_ok=True)
                 (evidence_root / "04-clang-tidy/result/fixes" / (slugs[unit] + ".yaml")).write_bytes(yaml_raw)
+                logs = evidence_root / "04-clang-tidy/result/logs"
+                logs.mkdir(parents=True, exist_ok=True)
+                (logs / (slugs[unit] + ".out.log")).write_bytes(b"")
+                (logs / (slugs[unit] + ".err.log")).write_text(
+                    unit + ":7:5: warning: synthetic warning [bugprone-example-check]\n", encoding="utf-8")
+                (logs / (slugs[unit] + ".log")).write_text("derived combined log must not be exported as native", encoding="utf-8")
                 tidy_warnings["raw_total"] += 1
                 tidy_warnings["unique_total"] += 1
                 tidy_warnings["by_check"].append({"check": "bugprone-example-check", "raw": 1, "unique": 1})
@@ -303,6 +309,14 @@ class HandoffExportTests(unittest.TestCase):
         self.assertEqual(manifest["counts"]["artifact_count_by_tool"], {
             "cppcheck": 1, "clang-tidy": 1, "clang-static-analyzer": 2,
         })
+        tidy = next(item for item in manifest["artifacts"] if item["tool"] == "clang-tidy")
+        self.assertEqual({item["stream"] for item in tidy["diagnostic_logs"]}, {"stdout", "stderr"})
+        for log in tidy["diagnostic_logs"]:
+            self.assertEqual(log["sha256"], _sha((self.output / log["path"]).read_bytes()))
+            self.assertTrue(any(item["path"] == log["path"] and item["purpose"] == "native-diagnostic-log"
+                                for item in manifest["provenance_inputs"]))
+        self.assertFalse(any(item["path"].endswith("/" + hashlib.sha256(tidy["analysis_unit"].encode()).hexdigest()[:20] + ".log")
+                             for item in manifest["provenance_inputs"]))
         delivery_receipt = json.loads((self.output / "delivery-receipt.json").read_text())
         self.assertEqual(delivery_receipt["manifest"]["sha256"], result["manifest_sha256"])
         for item in delivery_receipt["files"]:

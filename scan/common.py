@@ -11,6 +11,7 @@ import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -23,6 +24,30 @@ PROCESS_TIMEOUT = 900
 ACTIVE_PROCESSES = set()
 PROCESS_LOCK = threading.Lock()
 CANCELLED = threading.Event()
+
+
+class ScanCancelled(KeyboardInterrupt):
+    def __init__(self, signum):
+        self.exit_code = 128 + signum
+
+
+def cancellation_exit_code(error):
+    return getattr(error, "exit_code", 130)
+
+
+@contextmanager
+def cancellation_signals():
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    def terminate(signum, frame):
+        raise ScanCancelled(signum)
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def write_json(path, value):
@@ -181,9 +206,11 @@ def cancel_processes():
             stop_process(process)
 
 
+@cancellation_signals()
 def execute(command, cwd, stdout, stderr, timeout=None, env=None):
     started = datetime.now(timezone.utc).isoformat()
     timed_out = False
+    process = None
     with stdout.open("w", encoding="utf-8") as out_stream, stderr.open("w", encoding="utf-8") as err_stream:
         try:
             with PROCESS_LOCK:
@@ -202,12 +229,14 @@ def execute(command, cwd, stdout, stderr, timeout=None, env=None):
                 stop_process(process)
                 code = 124
                 err_stream.write("\nProcess timeout; process group terminated.\n")
-            except KeyboardInterrupt:
-                cancel_processes()
-                raise
             finally:
                 with PROCESS_LOCK:
                     ACTIVE_PROCESSES.discard(process)
+        except KeyboardInterrupt:
+            cancel_processes()
+            if process is not None:
+                stop_process(process)
+            raise
         except OSError as error:
             err_stream.write(str(error))
             code = 127

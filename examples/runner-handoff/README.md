@@ -41,3 +41,10 @@ file references are relative and the receiver does not need the original scan
 run or source checkout to verify the copied bytes. Exact absolute selected
 source strings remain opaque analysis-unit identifiers so native clang-tidy
 `MainSourceFile` bytes are not rewritten.
+
+For clang-tidy YAML artifacts, the exporter also binds captured native stdout
+and stderr logs, when present, through optional `diagnostic_logs` references
+and matching `native-diagnostic-log` provenance. A receiver can use an unambiguous native
+warning to corroborate line/column without accessing the original source.
+The logs do not replace YAML, alter counts or prove authenticated execution;
+older deliveries without these references cannot promise equivalent locations.
