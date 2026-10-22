@@ -4,8 +4,10 @@
 
 三工具自动化 C/C++ 静态代码分析执行器（Runner）：一键自动化调度 **Cppcheck**、**Clang-Tidy** 与 **Clang Static Analyzer (CSA)**，生成符合工业控制软件安全与 IEC 62443 标准要求的可审计结构化证据包。
 
-> **当前仓库状态：** `v1.0 规格定义与数据契约基线（开发推进中）`  
-> 本仓库当前已固化权威的数据接口契约、四层产物证据规范与目录布局。自动化调度脚本与 CLI 工具（`scan_all.sh`、`preflight.sh`、`verify.sh`）正由工程团队进行开发、测试与集成。
+> **当前状态：** 已有扫描执行器实现，端到端验收尚未完成。
+> 当前输出 `scanner-evidence-1`，明确标记 `downstream_compatible=false` 和
+> `release_ready=false`。下游契约导出和业务产品隔离继续暂缓，详见
+> [剩余验收工作](scan/IMPLEMENTATION_STATUS.md)。
 
 ---
 
@@ -15,37 +17,33 @@
 1. 从 CMake 导出的 `compile_commands.json` 自动解析出被测的编译单元（TU）；
 2. 在**完全相同的 Git 提交与相同的编译数据库**基线上，无缝并行调度 **Cppcheck (2.22+)**、**Clang-Tidy (LLVM 14+)**、**Clang Static Analyzer (LLVM 14+)**；
 3. 将产物整理为具有严格分层标识的自包含证据包（`[RAW]` 原生诊断、`[RECEIPT]` 运行收据、`[CACHE]` 内部缓存、`[DERIVED]` 衍生摘要）；
-4. 输出符合 `three-tool-input-1.0` 规范的标准包，供下游离线报告生成器直接消费（自动对账并映射至 CWE Top 25:2025、OWASP Top 10:2025，并评定 Critical/High/Medium/Low 四级工业审计风险）。
+4. 以 `three-tool-input-1.0` 为目标契约，支持后续离线报告的 CWE Top 25:2025、OWASP Top 10:2025 映射和 Critical/High/Medium/Low 四级风险评定。当前内部证据包尚不能直接输入下游生成器。
 
 完整技术规约与引擎实测行为请参考 [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md)（中文）或 [docs/SPEC.md](docs/SPEC.md)（英文）。
 
 ---
 
-## 2. 目标目录树结构
+## 2. 实际目录结构
 
 ```text
 three-tool-sast-runner/
-├── README.md               # 项目自述（英文）
-├── README.zh-CN.md         # 项目自述（中文）
-├── docs/
-│   ├── SPEC.md             # 完整技术契约与引擎实测规则（英文）
-│   └── SPEC.zh-CN.md       # 完整技术契约与引擎实测规则（中文）
-├── analy.config.example    # 扫描配置模板文件
-├── scan_all.sh             # [目标脚本] 主执行运行器
-├── preflight.sh            # [目标脚本] 主机依赖环境预检脚本
-├── verify.sh               # [目标脚本] 针对合成最小工程的端到端冒烟测试
-├── scripts/                # [目标脚本] 辅助工具与环境快照采集
-│   ├── analy_config.sh
-│   └── collect_acceptance_env.sh
-├── cpp_check/              # [目标模块] Cppcheck 包装器与源码构建
-│   ├── scan.sh
-│   └── scripts/
-├── clang_tidy/             # [目标模块] Clang-Tidy 多进程并行运行器
-│   ├── scan.sh
-│   └── scripts/
-└── clang_static_analyzer/  # [目标模块] CSA 逐 TU 运行器（输出原生 Plist）
-    ├── scan.sh
-    └── scripts/
+├── README.md / README.zh-CN.md
+├── docs/SPEC.md / SPEC.zh-CN.md
+├── analy.config.example    # JSON 模板，复制到 scan/analy.config
+├── requirements.txt        # 原生 YAML 校验所需的 Python 依赖
+├── install/
+│   ├── install_all.sh      # 工具安装入口，可能联网或访问软件包源
+│   ├── preflight.sh        # 二进制可用性检查，不是发布认证
+│   └── cpp_check/          # 源码归档和安装器
+├── scan/
+│   ├── scan_all.sh         # 主执行入口
+│   ├── verify.sh           # 临时合成工程的真实分析器冒烟验证
+│   ├── serve.sh            # 本地报告浏览
+│   ├── IMPLEMENTATION_STATUS.md
+│   ├── cpp_check/scan.sh
+│   ├── clang_tidy/scan.sh
+│   └── clang_static_analyzer/scan.sh
+└── tests/
 ```
 
 ---
@@ -76,42 +74,50 @@ three-tool-sast-runner/
 
 ---
 
-## 5. 快速上手（目标使用流程）
+## 5. 快速上手
 
-### 5.1 环境自检
-在部署机上验证基础依赖（Bash, Python 3, CMake, Clang, Clang-Tidy, Cppcheck）：
+在目标 Ubuntu 24.04 主机上，从仓库根目录执行。需要 Python 3.10+，并另外准备
+Cppcheck 2.22+ 和 LLVM 14+。内置 Cppcheck 源码仍是开发快照，不满足证据门禁的版本要求。
+精简 Ubuntu 镜像还需 `python3-venv` 创建虚拟环境、`xz-utils` 解压内置源码；
+源码编译另需相应构建工具链。
+
 ```bash
-bash preflight.sh
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r requirements.txt
+bash install/preflight.sh
+cp analy.config.example scan/analy.config
 ```
 
-### 5.2 冒烟验证
-在临时合成工程上执行自检验证：
+编辑 `scan/analy.config`，只填写 JSON 字段 `scan_paths`（非空路径数组）和
+`result_path`（输出目录），替换模板占位路径。配置内相对路径以 `scan/` 为基准，
+不是当前 Shell 目录。不支持 Shell 赋值和旧 `SCAN_CODE_DIR` / `BUILD_DIR` 字段。
+
 ```bash
-bash verify.sh
+bash scan/scan_all.sh
+# 等价的命令行输入；其中相对路径以当前目录为基准：
+bash scan/scan_all.sh --scan-path /path/to/product/src --result-path /path/to/results
+# 只扫描临时缺陷样例，不扫描所传业务源码：
+bash scan/verify.sh --scan-path /path/to/product/src --result-path /path/to/smoke-results
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 ```
 
-### 5.3 配置并启动扫描
-1. 复制配置模板：
-   ```bash
-   cp analy.config.example analy.config
-   ```
-2. 编辑 `analy.config` 指定工程路径：
-   ```bash
-   SCAN_CODE_DIR=/path/to/source/root
-   WORK_DIR=/path/to/output/directory
-   BUILD_DIR=/path/to/cmake/build   # 必须包含 compile_commands.json
-   SCAN_SUBDIRS=src,include         # 可选，留空自动扫描全库
-   ```
-3. 运行完整扫描套件：
-   ```bash
-   bash scan_all.sh
-   ```
+执行器从每个扫描路径逐级向上寻找 `compile_commands.json`、
+`build/compile_commands.json` 或 `build/Debug/compile_commands.json`。
+三工具证据扫描需要共同的编译数据库。同一数据库内源码的编译配置冲突会被拒绝，应先选定经确认的
+构建配置；传入多个目录不能证明业务产品隔离。
+
+`install/install_all.sh` 可能调用 apt 或下载软件包，不是完整离线安装器。断网运行前须先
+准备分析器、Python 依赖和构建资源。退出码 0 表示执行成功，不代表发布批准；1 表示执行或
+报告失败，2 表示输入错误，3 表示执行成功但证据门禁失败，130 表示取消。冒烟测试另有样例
+验证结果，不能认证产品或源码基线。
 
 ---
 
-## 6. 下游自动化报告生成对接
+## 6. 下游自动化报告生成对接（目标契约）
 
-下游是独立的 `sast-report-pipeline`。须按 [SPEC 第 7 节](docs/SPEC.zh-CN.md#7-对接下游离线报告生成器)
+下游是独立的 `sast-report-pipeline`。以下是目标接口，不是当前执行器已经打通的交接流程。
+须按 [SPEC 第 7 节](docs/SPEC.zh-CN.md#7-对接下游离线报告生成器)
 生成根清单，包含 v1.2 producer 标记、本地冻结资产和哈希绑定收据；仅有编号目录不能导入。
 clang-tidy 零告警仅可在显式 summary 收据校验通过后省略 YAML，不得伪造 YAML。
 
@@ -125,7 +131,7 @@ python3 scripts/three_tool_report.py generate \
 ```
 
 产物是候选报告，不是客户发布或 IEC 62443 认证。命令行 PDF 须另行验收渲染工具链，
-网页工作台当前不支持 PDF。Runner 脚本仍在开发中，文档和下游合成测试不证明其执行已验收。
+网页工作台当前不支持 PDF。执行器测试通过，不证明下游导入、产品归属、映射或发布门禁通过。
 
 ---
 

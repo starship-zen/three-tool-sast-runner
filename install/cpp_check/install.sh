@@ -4,16 +4,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TOOL_DIR="${SCRIPT_DIR}"
-SOURCE_DIR="${CPPCHECK_SOURCE_DIR:-${TOOL_DIR}/tmp/cppcheck-source/cppcheck}"
+DEFAULT_SOURCE_DIR="${TOOL_DIR}/tmp/cppcheck-source/cppcheck"
+SOURCE_DIR="${CPPCHECK_SOURCE_DIR:-${DEFAULT_SOURCE_DIR}}"
+SOURCE_EXTRACTED_BY_RUN=false
 PREFIX="${CPPCHECK_INSTALL_PREFIX:-${HOME:+${HOME}/.local}}"
 FILESDIR="${CPPCHECK_FILESDIR:-${PREFIX}/share/Cppcheck}"
 JOBS="${CPPCHECK_BUILD_JOBS:-$(nproc)}"
 MATCHCOMPILER="${CPPCHECK_MATCHCOMPILER:-yes}"
 BUILD_SYSTEM="${CPPCHECK_BUILD_SYSTEM:-make}"
-# make 是源码内就地编译，会留下上百 MB 的 .o 与二进制；安装后默认清理，
-# 避免把源码目录一起打包交接时体积膨胀。需要保留增量编译时设为 0。
+# make 会在源码树留下构建产物；仅本次从固定归档新解出的源码树可自动清理。
+# 调用方指定或已有的源码树始终保留；设为 0 可保留本次新解出的树以便增量编译。
 CLEAN_AFTER_BUILD="${CPPCHECK_CLEAN_AFTER_BUILD:-1}"
-CMAKE_BUILD_DIR="${CPPCHECK_CMAKE_BUILD_DIR:-${TOOL_DIR}/tmp/cppcheck-cmake-build}"
+DEFAULT_CMAKE_BUILD_DIR="${TOOL_DIR}/tmp/cppcheck-cmake-build"
+# Explicit CMake build-directory overrides are retained because their contents are caller-owned.
+CMAKE_BUILD_DIR="${CPPCHECK_CMAKE_BUILD_DIR:-${DEFAULT_CMAKE_BUILD_DIR}}"
+CMAKE_BUILD_DIR_CREATED_BY_RUN=false
 
 log() { printf '[install][cppcheck] %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -28,9 +33,14 @@ if [[ -z "${CPPCHECK_SOURCE_DIR:-}" ]]; then
     if [[ -f "${SOURCE_DIR}/Makefile" ]]; then
         cmp -s "${CHECKSUM}" "${SOURCE_STAMP}" || die "cached source snapshot differs; remove ${SOURCE_DIR%/cppcheck} before rebuilding"
     else
+        SOURCE_PATH_WAS_ABSENT=true
+        [[ ! -e "${SOURCE_DIR}" && ! -L "${SOURCE_DIR}" ]] || SOURCE_PATH_WAS_ABSENT=false
         mkdir -p "$(dirname "${SOURCE_DIR}")"
         tar -xJf "${ARCHIVE}" -C "$(dirname "${SOURCE_DIR}")"
         cp "${CHECKSUM}" "${SOURCE_STAMP}"
+        if [[ "${SOURCE_PATH_WAS_ABSENT}" == true ]]; then
+            SOURCE_EXTRACTED_BY_RUN=true
+        fi
     fi
 fi
 [[ -d "${SOURCE_DIR}" ]] || die "cppcheck source not found: ${SOURCE_DIR}"
@@ -46,12 +56,65 @@ have_cxx() {
     return 1
 }
 
-# 删除目录内容（避免依赖 rm -rf）。
-clean_dir() {
-    local dir="$1"
-    [[ -d "${dir}" ]] || return 0
-    find "${dir}" -mindepth 1 -delete 2>/dev/null || true
-    rmdir "${dir}" 2>/dev/null || true
+path_is_same_or_child() {
+    local candidate="$1"
+    local parent="$2"
+    [[ "${parent}" == "/" ]] && [[ "${candidate}" == /* ]] && return 0
+    [[ "${candidate}" == "${parent}" || "${candidate}" == "${parent}/"* ]]
+}
+
+clean_default_cmake_build_dir() {
+    local build_real source_real
+    if [[ "${CMAKE_BUILD_DIR_CREATED_BY_RUN}" != true || -n "${CPPCHECK_CMAKE_BUILD_DIR:-}" ]]; then
+        log "keeping caller-supplied or pre-existing CMake build directory"
+        return 0
+    fi
+    if [[ ! -d "${CMAKE_BUILD_DIR}" || -L "${CMAKE_BUILD_DIR}" || ! -O "${CMAKE_BUILD_DIR}" ]]; then
+        log "keeping CMake build directory because its ownership or path is unsafe"
+        return 0
+    fi
+    build_real="$(cd -- "${CMAKE_BUILD_DIR}" 2>/dev/null && pwd -P)" || {
+        log "keeping CMake build directory because its resolved path is unavailable"
+        return 0
+    }
+    source_real="$(cd -- "${SOURCE_DIR}" 2>/dev/null && pwd -P)" || {
+        log "keeping CMake build directory because the source path cannot be resolved"
+        return 0
+    }
+    if [[ "${build_real}" != "${DEFAULT_CMAKE_BUILD_DIR}" ]] || \
+        path_is_same_or_child "${source_real}" "${build_real}" || \
+        path_is_same_or_child "${build_real}" "${source_real}"; then
+        log "keeping CMake build directory because its resolved path is unsafe"
+        return 0
+    fi
+    log "removing installer-created CMake build artifacts from ${CMAKE_BUILD_DIR}"
+    if find "${CMAKE_BUILD_DIR}" -mindepth 1 -delete 2>/dev/null; then
+        rmdir "${CMAKE_BUILD_DIR}" 2>/dev/null || true
+    else
+        log "warning: CMake build directory cleanup was incomplete"
+    fi
+}
+
+clean_fresh_default_source_artifacts() {
+    local source_real
+    if [[ "${SOURCE_EXTRACTED_BY_RUN}" != true || "${SOURCE_DIR}" != "${DEFAULT_SOURCE_DIR}" || \
+        -L "${SOURCE_DIR}" || ! -O "${SOURCE_DIR}" ]]; then
+        log "keeping caller-supplied or pre-existing source directory"
+        return 0
+    fi
+    source_real="$(cd -- "${SOURCE_DIR}" 2>/dev/null && pwd -P)" || {
+        log "keeping source directory because its resolved path is unavailable"
+        return 0
+    }
+    if [[ "${source_real}" != "${DEFAULT_SOURCE_DIR}" ]]; then
+        log "keeping source directory because its resolved path is unsafe"
+        return 0
+    fi
+    log "cleaning build artifacts in freshly extracted source ${SOURCE_DIR}"
+    make -C "${SOURCE_DIR}" clean >/dev/null 2>&1 || \
+        log "warning: make clean failed; 源码目录可能残留 .o（不影响安装结果）"
+    # The archive was extracted by this run, so this fallback only removes its build output.
+    find "${SOURCE_DIR}" -name '*.o' -delete 2>/dev/null || true
 }
 
 case "${BUILD_SYSTEM}" in
@@ -68,11 +131,7 @@ make)
     make -C "${SOURCE_DIR}" install PREFIX="${PREFIX}" FILESDIR="${FILESDIR}"
 
     if [[ "${CLEAN_AFTER_BUILD}" != "0" ]]; then
-        log "cleaning build artifacts in ${SOURCE_DIR} (CPPCHECK_CLEAN_AFTER_BUILD=0 可保留)"
-        make -C "${SOURCE_DIR}" clean >/dev/null 2>&1 ||
-            log "warning: make clean failed; 源码目录可能残留 .o（不影响安装结果）"
-        # make clean 会漏掉个别生成物（如 cppcheck Makefile 产出的 "-.o"）。
-        find "${SOURCE_DIR}" -name '*.o' -delete 2>/dev/null || true
+        clean_fresh_default_source_artifacts
     fi
     ;;
 cmake)
@@ -82,6 +141,9 @@ cmake)
         die "C++ 编译器 not found; 安装：sudo apt-get install -y build-essential"
     # 源码树外构建，保持 source/cppcheck 目录干净。
     log "building from ${SOURCE_DIR} with CMake (build dir=${CMAKE_BUILD_DIR})"
+    if [[ -z "${CPPCHECK_CMAKE_BUILD_DIR:-}" && ! -e "${CMAKE_BUILD_DIR}" && ! -L "${CMAKE_BUILD_DIR}" ]]; then
+        CMAKE_BUILD_DIR_CREATED_BY_RUN=true
+    fi
     cmake -S "${SOURCE_DIR}" -B "${CMAKE_BUILD_DIR}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
@@ -90,8 +152,7 @@ cmake)
     cmake --install "${CMAKE_BUILD_DIR}"
 
     if [[ "${CLEAN_AFTER_BUILD}" != "0" ]]; then
-        log "removing out-of-source build dir ${CMAKE_BUILD_DIR} (CPPCHECK_CLEAN_AFTER_BUILD=0 可保留)"
-        clean_dir "${CMAKE_BUILD_DIR}"
+        clean_default_cmake_build_dir
     fi
     ;;
 *)

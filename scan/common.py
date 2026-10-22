@@ -131,7 +131,7 @@ def plan(paths, source_fallback=False):
         if not isinstance(entries, list):
             raise ValueError("编译数据库必须为数组: " + str(database))
         selected = []
-        seen = set()
+        contexts = {}
         for entry in entries:
             if not isinstance(entry, dict) or not isinstance(entry.get("file"), str):
                 raise ValueError("编译数据库包含无效记录: " + str(database))
@@ -147,10 +147,14 @@ def plan(paths, source_fallback=False):
                 arguments = shlex.split(entry.get("command", ""))
             if not isinstance(arguments, list) or not arguments or any(not isinstance(item, str) for item in arguments):
                 raise ValueError("编译记录缺少有效 command/arguments: " + str(source))
-            if source in seen:
+            selected_entry = {"directory": str(directory), "file": str(source), "arguments": arguments}
+            previous = contexts.get(source)
+            if previous is not None:
+                if previous["directory"] != selected_entry["directory"] or previous["arguments"] != arguments:
+                    raise ValueError("同一源码存在冲突的编译上下文: " + str(source))
                 continue
-            seen.add(source)
-            selected.append({"directory": str(directory), "file": str(source), "arguments": arguments})
+            contexts[source] = selected_entry
+            selected.append(selected_entry)
         if not selected:
             raise ValueError("扫描范围未匹配任何编译单元: " + ", ".join(map(str, scopes)))
         groups.append((database, scopes, sorted(selected, key=lambda entry: entry["file"])))

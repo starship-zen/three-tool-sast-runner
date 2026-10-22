@@ -4,8 +4,10 @@
 
 Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, and **Clang Static Analyzer (CSA)** to produce standardized, auditable evidence packages for industrial control software and IEC 62443 compliance.
 
-> **Current Repository Status:** `v1.0 Specification & Interface Contract Baseline`  
-> This repository currently defines the authoritative interface contract, evidence schema, and directory layout. The runner scripts and CLI tooling (`scan_all.sh`, `preflight.sh`, `verify.sh`) are actively being implemented and integrated by the engineering team.
+> **Current status:** Scanner implementation; end-to-end acceptance incomplete.
+> The runner emits `scanner-evidence-1` with `downstream_compatible=false` and
+> `release_ready=false`. The `three-tool-input-1.0` exporter and business-product
+> isolation remain deferred. See [remaining acceptance work](scan/IMPLEMENTATION_STATUS.md).
 
 ---
 
@@ -15,35 +17,33 @@ Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, an
 1. Discover target Translation Units (TUs) from CMake `compile_commands.json`.
 2. Run **Cppcheck (2.22+)**, **Clang-Tidy (LLVM 14+)**, and **Clang Static Analyzer (LLVM 14+)** on the exact same commit and compile database.
 3. Format outputs into a strictly layered, immutable evidence bundle (`[RAW]` diagnostics, `[RECEIPT]` execution receipts, `[CACHE]` states, and `[DERIVED]` summaries).
-4. Generate a self-describing bundle complying with the `three-tool-input-1.0` contract, ready for downstream offline report generation (mapping to CWE Top 25:2025, OWASP Top 10:2025, and Critical/High/Medium/Low audit risk ratings).
+4. Target the `three-tool-input-1.0` contract for downstream offline report generation (CWE Top 25:2025, OWASP Top 10:2025, and Critical/High/Medium/Low risk ratings). The current internal bundle is not yet a valid input to that consumer.
 
 For the full architectural specification and interface contract, see [docs/SPEC.md](docs/SPEC.md) (English) or [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md) (中文).
 
 ---
 
-## 2. Target Directory Structure
+## 2. Directory Structure
 
 ```text
 three-tool-sast-runner/
-├── README.md               # Quickstart and project status
-├── docs/
-│   └── SPEC.md             # Full interface contract & empirical engine rules
-├── analy.config.example    # Configuration template
-├── scan_all.sh             # [Target Script] Master execution runner
-├── preflight.sh            # [Target Script] Host dependency preflight check
-├── verify.sh               # [Target Script] End-to-end smoke test on a synthetic project
-├── scripts/                # [Target Scripts] Helper utilities and environment capture
-│   ├── analy_config.sh
-│   └── collect_acceptance_env.sh
-├── cpp_check/              # [Target Module] Cppcheck wrapper and source build
-│   ├── scan.sh
-│   └── scripts/
-├── clang_tidy/             # [Target Module] Clang-Tidy parallel runner
-│   ├── scan.sh
-│   └── scripts/
-└── clang_static_analyzer/  # [Target Module] CSA per-TU runner with native Plist output
-    ├── scan.sh
-    └── scripts/
+├── README.md / README.zh-CN.md
+├── docs/SPEC.md / SPEC.zh-CN.md
+├── analy.config.example    # JSON template; copy to scan/analy.config
+├── requirements.txt        # Python dependency for native YAML validation
+├── install/
+│   ├── install_all.sh      # Tool installers; may require network/package access
+│   ├── preflight.sh        # Binary availability check, not release certification
+│   └── cpp_check/          # Bundled source archive and installer
+├── scan/
+│   ├── scan_all.sh         # Master runner
+│   ├── verify.sh           # Real-analyzer smoke test on a temporary fixture
+│   ├── serve.sh            # Local report browsing
+│   ├── IMPLEMENTATION_STATUS.md
+│   ├── cpp_check/scan.sh
+│   ├── clang_tidy/scan.sh
+│   └── clang_static_analyzer/scan.sh
+└── tests/
 ```
 
 ---
@@ -72,9 +72,53 @@ three-tool-sast-runner/
 
 ---
 
-## 5. Downstream Ingestion
+## 5. Quickstart
 
-The consumer is the standalone `sast-report-pipeline`. Emit the root manifest
+Run from the repository root on the intended Ubuntu 24.04 host. Use Python 3.10+
+and provision Cppcheck 2.22+ and LLVM 14+ separately. The bundled Cppcheck source
+is a development snapshot, not the qualified version required by the evidence gate.
+Minimal Ubuntu images also need `python3-venv` for the virtual environment and
+`xz-utils` for the bundled source archive; source builds need their own toolchain.
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r requirements.txt
+bash install/preflight.sh
+cp analy.config.example scan/analy.config
+```
+
+Edit `scan/analy.config` as JSON using only `scan_paths` (nonempty path array)
+and `result_path` (output directory). Replace the template's placeholder paths.
+Relative paths are resolved against `scan/`, not the shell's working directory.
+Shell assignments and the old `SCAN_CODE_DIR` / `BUILD_DIR` keys are not supported.
+
+```bash
+bash scan/scan_all.sh
+# Equivalent CLI input; these paths are relative to the current directory:
+bash scan/scan_all.sh --scan-path /path/to/product/src --result-path /path/to/results
+# Temporary defect fixture only; it does not scan the supplied business source:
+bash scan/verify.sh --scan-path /path/to/product/src --result-path /path/to/smoke-results
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+```
+
+For each scan path, the runner searches its ancestors for `compile_commands.json`,
+`build/compile_commands.json` or `build/Debug/compile_commands.json`. Use a common
+compile database for the three-tool evidence run. Within one database, conflicting
+contexts for one source are rejected; select one approved build configuration first.
+Multiple paths do not establish business-product isolation.
+
+`install/install_all.sh` may use apt or download packages; it is not a complete
+offline installer. Prepare analyzers, Python dependencies and build resources
+before disconnected use. Exit 0 is execution success, not release approval;
+exit 1 is an execution/report failure, 2 an input error, 3 an evidence-gate
+failure after successful execution, and 130 cancellation. The synthetic smoke
+test has its own fixture result and does not certify a product or source baseline.
+
+## 6. Downstream Ingestion (Target Contract)
+
+The consumer is the standalone `sast-report-pipeline`. The following is its target
+interface, not a working handoff from the current runner. Emit the root manifest
 specified in [SPEC section 7](docs/SPEC.md#7-downstream-ingestion-contract),
 including the v1.2 producer marker, local frozen assets and hash-bound receipts.
 Numbered directories alone are not accepted. Zero-warning clang-tidy may omit
@@ -89,10 +133,10 @@ python3 scripts/three_tool_report.py generate \
 
 This produces a candidate, not customer release or IEC 62443 certification.
 CLI PDF requires a separately verified renderer; the web workbench has no PDF
-capability. Current runner scripts remain under implementation, not validated
-by this documentation or the reporting consumer's synthetic tests.
+capability. Passing runner tests does not validate downstream ingestion or the
+reporting consumer's product, mapping and release gates.
 
 ---
 
-## 6. License & Compliance
+## 7. License & Compliance
 Designed for industrial functional safety and cybersecurity compliance (IEC 62443-4-1 SI-1 & SI-2).

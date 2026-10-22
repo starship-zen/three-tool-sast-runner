@@ -33,6 +33,9 @@ class ScanTests(unittest.TestCase):
         self.first.write_text("int first() { return 0; }\n")
         self.second = self.source / "second.cpp"
         self.second.write_text("int second() { return 1; }\n")
+        self.noop_tool = self.folder / "no-op-tool"
+        self.noop_tool.write_text("#!" + sys.executable + "\npass\n")
+        self.noop_tool.chmod(0o755)
         self.config = self.folder / "analy.config"
         self.database = self.project / "build/compile_commands.json"
         self.database.parent.mkdir()
@@ -132,11 +135,50 @@ class ScanTests(unittest.TestCase):
         self.assertEqual([entry["file"] for entry in groups[0][2]], [str(self.first), str(self.second)])
         self.assertEqual(groups[0][2][1]["arguments"][0], "c++")
 
-    def test_first_record_wins_and_file_scope_is_exact(self):
-        self.database.write_text(json.dumps(self.entries + [self.entries[0]]))
-        entries = common.plan([self.first])[0][2]
-        self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["file"], str(self.first))
+    def test_identical_compile_contexts_deduplicate_and_file_scope_is_exact(self):
+        original = self.entries[0]
+        equivalent = {"directory": str(self.project / "build" / ".."), "file": "src/first.cpp",
+                      "command": "c++ -c src/first.cpp -o first.o"}
+        planned = []
+        for records in ([original, equivalent], [equivalent, original]):
+            self.database.write_text(json.dumps(records))
+            entries = common.plan([self.first])[0][2]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["file"], str(self.first))
+            self.assertEqual(entries[0]["directory"], str(self.project))
+            self.assertEqual(entries[0]["arguments"], original["arguments"])
+            planned.append(entries)
+        self.assertEqual(planned[0], planned[1])
+
+    def test_conflicting_macro_contexts_fail_in_any_database_order(self):
+        first = {"directory": str(self.project), "file": "src/first.cpp",
+                 "arguments": ["c++", "-DPRODUCT_A=1", "-c", "src/first.cpp", "-o", "first.o"]}
+        second = {**first, "arguments": ["c++", "-DPRODUCT_A=2", "-c", "src/first.cpp", "-o", "first.o"]}
+        for records in ([first, second], [second, first]):
+            self.database.write_text(json.dumps(records))
+            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
+                common.plan([self.first])
+
+    def test_conflicting_directories_fail_in_any_database_order(self):
+        arguments = ["c++", "-c", str(self.first), "-o", "first.o"]
+        first = {"directory": str(self.project), "file": str(self.first), "arguments": arguments}
+        second = {"directory": str(self.project / "build"), "file": str(self.first), "arguments": arguments}
+        for records in ([first, second], [second, first]):
+            self.database.write_text(json.dumps(records))
+            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
+                common.plan([self.first])
+
+    def test_conflicting_context_fails_before_run_creation_or_scanning(self):
+        first = {"directory": str(self.project), "file": "src/first.cpp",
+                 "arguments": ["c++", "-DPRODUCT_A=1", "-c", "src/first.cpp", "-o", "first.o"]}
+        second = {**first, "arguments": ["c++", "-DPRODUCT_A=2", "-c", "src/first.cpp", "-o", "first.o"]}
+        self.database.write_text(json.dumps([first, second]))
+        output = self.folder / "must-not-be-created"
+        with patch.object(session, "complete_run") as complete_run:
+            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
+                session.run([self.first], output, SCANNERS)
+            complete_run.assert_not_called()
+        self.assertFalse(output.exists())
 
     def test_missing_database_does_not_fallback(self):
         self.database.unlink()
@@ -260,7 +302,7 @@ else:
     def test_tool_failure_is_reported_and_other_tools_continue(self):
         output = self.folder / "failed-results"
         success = {"ok": True}
-        with patch.object(common, "find_tool", return_value="/bin/true"), \
+        with patch.object(common, "find_tool", return_value=str(self.noop_tool)), \
                 patch.object(cppcheck, "scan", side_effect=OSError("failure")), \
                 patch.object(tidy, "scan", return_value=success.copy()) as tidy_scan, \
                 patch.object(csa, "scan", return_value=success.copy()) as csa_scan, \
@@ -276,7 +318,7 @@ else:
         database, scopes, entries = common.plan([self.first])[0]
         output = self.folder / "no-plist"
         receipt = csa.scan(entries, scopes, database, output,
-                                   {"clang": "/bin/true", "clang++": "/bin/true"})
+                                   {"clang": str(self.noop_tool), "clang++": str(self.noop_tool)})
         self.assertFalse(receipt["ok"])
         self.assertIn("artifact_error", receipt["files"][0])
 
@@ -319,7 +361,7 @@ else:
     def test_main_without_database_keeps_cppcheck_but_marks_clang_unavailable(self):
         self.database.unlink()
         output = self.folder / "fallback-results"
-        with patch.object(common, "find_tool", return_value="/bin/true"), \
+        with patch.object(common, "find_tool", return_value=str(self.noop_tool)), \
                 patch.object(cppcheck, "scan", return_value={"ok": True, "mode": "source"}), \
                 patch("session.render_reports"), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(session.run([self.source], output, SCANNERS), 1)
@@ -331,7 +373,7 @@ else:
 
     def test_report_failure_is_not_silently_successful(self):
         output = self.folder / "report-failure"
-        with patch.object(common, "find_tool", return_value="/bin/true"), \
+        with patch.object(common, "find_tool", return_value=str(self.noop_tool)), \
                 patch.object(cppcheck, "scan", return_value={"ok": True}), \
                 patch("session.render_reports", side_effect=ValueError("HTML failed")), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -388,7 +430,8 @@ else:
 
     def test_zero_exit_without_cppcheck_xml_is_a_failure(self):
         database, _, entries = common.plan([self.first])[0]
-        receipt = cppcheck.scan(entries, [self.source], database, self.folder / "no-xml", {"cppcheck": "/bin/true"})
+        receipt = cppcheck.scan(entries, [self.source], database, self.folder / "no-xml",
+                                {"cppcheck": str(self.noop_tool)})
         self.assertFalse(receipt["ok"])
         self.assertIn("artifact_error", receipt)
 

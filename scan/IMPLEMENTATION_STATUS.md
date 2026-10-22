@@ -1,25 +1,25 @@
 # Remaining Acceptance Work
 
-Status as of October 21, 2026. Implementation tests and real analyzer executions
+Status as of October 22, 2026. Implementation tests and real analyzer executions
 are not substitutes for downstream or business-owner acceptance.
 
 ## 1. Tool Upgrade: Deferred By Owner
 
-No tool installation, tool-path selection or version threshold is changed in this
+No production tool installation, tool-path selection or version threshold is changed in this
 round. LLVM 10 and the Cppcheck development build still fail version evidence
 checks. Execution may succeed while the main command returns 3. Do not remove
 this check or relabel the installed binaries to make it pass.
 
-## 2. Downstream Schema And Ingestion: Missing External Inputs
+## 2. Downstream Schema And Ingestion: Deferred Integration
 
-The actual `scripts/three_tool_report.py` generator and authoritative
-`three-tool-input-1.0` schema were not found in the searched local scanner/document
-directories or the remote user workspace. The runner continues to export the
-honestly labeled `scanner-evidence-1` manifest with `downstream_compatible=false`.
+The reporting consumer is `sast-report-pipeline`; its implementation has been
+located during review. The runner does not yet implement its authoritative
+`three-tool-input-1.0` contract and continues to export the honestly labeled
+`scanner-evidence-1` manifest with `downstream_compatible=false`.
 
-Required inputs are the downstream repository/path and version, its schema or
-validator, installation dependencies, and ideally a known-good evidence bundle.
-Once supplied, implement its exact exporter without guessing fields; pin the
+Follow-up integration must pin the actual consumer version and schema/validator,
+provision its dependencies, and use a known-good evidence bundle as a reference.
+Implement its exact exporter without guessing fields; pin the
 generator version; validate relocation and strict real ingestion; inspect all
 generated reports including the zero-diagnostic case. Deleted Plists, changed
 hashes and inconsistent TU sets must be rejected in negative tests. No extra

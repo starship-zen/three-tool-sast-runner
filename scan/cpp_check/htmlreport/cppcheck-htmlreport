@@ -14,6 +14,7 @@ import subprocess
 import time
 
 from collections import Counter
+from urllib.parse import quote
 from pygments import highlight
 from pygments.lexers import guess_lexer, guess_lexer_for_filename
 from pygments.formatters import HtmlFormatter  # pylint: disable=no-name-in-module
@@ -457,12 +458,13 @@ html_unescape_table = {v: k for k, v in html_escape_table.items()}
 
 
 def html_escape(text):
-    return escape(text, html_escape_table)
+    return escape(str(text), html_escape_table)
 
 def filter_button(enabled_filters, id, function):
     enabled = enabled_filters.get(id, False)
     if not id:
         id = 'None'
+    id = html_escape(id)
     return '\n        <label class="checkBtn%s"><input type="checkbox" onclick="%s(this)" id="%s" %s>%s</label>'\
           % (' disabled' if not enabled else '', function, id, 'checked' if enabled else 'disabled', id)
 
@@ -539,38 +541,38 @@ def blame_lookup(blame_data, line):
 
 def tr_str(td_th, line, id, cwe, severity, classification, guideline, message, timestamp, author, author_mail, date, add_author, tr_class=None, htmlfile=None, message_class=None):
     ret = ''
-    items = [id, cwe]
+    items = [html_escape(id), cwe]
     if severity:
-        items.append(severity)
+        items.append(html_escape(severity))
     if classification:
-        items.extend([classification, guideline])
+        items.extend([html_escape(classification), html_escape(guideline)])
     if htmlfile:
         if htmlfile.startswith("http://") or htmlfile.startswith("https://"):
             # GitHub/GitLab style line anchor
             href = f"{htmlfile.rstrip('#L1')}#L{line}"
             # Emit **line number with link**
-            ret += f'<{td_th}><a href="{href}" target="_blank" rel="noopener noreferrer">{line}</a></{td_th}>'
+            ret += f'<{td_th}><a href="{html_escape(href)}" target="_blank" rel="noopener noreferrer">{html_escape(line)}</a></{td_th}>'
         else:
             # local HTML annotated
             href = f"{htmlfile}#line-{line}"
             # Emit **line number with link**
-            ret += f'<{td_th}><a href="{href}">{line}</a></{td_th}>'
+            ret += f'<{td_th}><a href="{html_escape(href)}">{html_escape(line)}</a></{td_th}>'
 
         # Emit id, cwe, severity, classification, ...
         for item in items:
             ret += f'<{td_th}>{item}</{td_th}>'
     else:
-        items.insert(0,line)
+        items.insert(0, html_escape(line))
         for item in items:
             ret += '<%s>%s</%s>' % (td_th, item, td_th)
     if message_class:
-        message_attribute = ' class="%s"' % message_class
+        message_attribute = ' class="%s"' % html_escape(message_class)
     else:
         message_attribute = ''
     ret += '<%s%s>%s</%s>' % (td_th, message_attribute, html_escape(message), td_th)
 
     if timestamp:
-        ret += '<%s>%s</%s>' % (td_th, timestamp, td_th)
+        ret += '<%s>%s</%s>' % (td_th, html_escape(timestamp), td_th)
 
     for field in  add_author:
         if field == 'name':
@@ -578,10 +580,10 @@ def tr_str(td_th, line, id, cwe, severity, classification, guideline, message, t
         elif field == 'email':
             ret += '<%s>%s</%s>' % (td_th, html_escape(author_mail), td_th)
         elif field == 'date':
-            ret += '<%s>%s</%s>' % (td_th, date, td_th)
+            ret += '<%s>%s</%s>' % (td_th, html_escape(date), td_th)
 
     if tr_class:
-        tr_attributes = ' class="%s"' % tr_class
+        tr_attributes = ' class="%s"' % html_escape(tr_class)
     else:
         tr_attributes = ''
     return '<tr%s>%s</tr>' % (tr_attributes, ret)
@@ -620,15 +622,15 @@ class AnnotateCodeFormatter(HtmlFormatter):
                                 # from actual message
                                 if error.get('verbose') and (error['verbose'] != error['msg']):
                                     index = t.rfind('\n')
-                                    t = t[:index] + HTML_EXPANDABLE_INCONCLUSIVE % (error['msg'], html_escape(error['verbose'].replace("\\012", '\n'))) + t[index + 1:]
+                                    t = t[:index] + HTML_EXPANDABLE_INCONCLUSIVE % (html_escape(error['msg']), html_escape(error['verbose'].replace("\\012", '\n'))) + t[index + 1:]
                                 else:
-                                    t = t.replace('\n', HTML_INCONCLUSIVE % error['msg'])
+                                    t = t.replace('\n', HTML_INCONCLUSIVE % html_escape(error['msg']))
                         except KeyError:
                             if error.get('verbose') and (error['verbose'] != error['msg']):
                                 index = t.rfind('\n')
-                                t = t[:index] + HTML_EXPANDABLE_ERROR % (error['msg'], html_escape(error['verbose'].replace("\\012", '\n'))) + t[index + 1:]
+                                t = t[:index] + HTML_EXPANDABLE_ERROR % (html_escape(error['msg']), html_escape(error['verbose'].replace("\\012", '\n'))) + t[index + 1:]
                             else:
-                                t = t.replace('\n', HTML_ERROR % error['msg'])
+                                t = t.replace('\n', HTML_ERROR % html_escape(error['msg']))
 
                 line_no = line_no + 1
             yield i, t
@@ -824,7 +826,7 @@ def main() -> None:
             if is_remote:
                 # Construct remote URL for GitHub/GitLab
                 # tr_str() will use the actual line number, so we can just start with line 1
-                remote_url = source_dir.rstrip('/') + '/' + filename + '#L1'
+                remote_url = source_dir.rstrip('/') + '/' + quote(filename, safe='/') + '#L1'
                 files[filename] = {'errors': [], 'htmlfile': remote_url}
             else:
                 files[filename] = {'errors': [], 'htmlfile': str(file_no) + '.html'}
@@ -897,15 +899,15 @@ def main() -> None:
 
         with io.open(os.path.join(options.report_dir, htmlfile), 'w', encoding='utf-8') as output_file:
             output_file.write(HTML_HEAD %
-                              (options.title,
+                              (html_escape(options.title),
                                htmlFormatter.get_style_defs('.highlight'),
-                               options.title,
-                               ': ' + filename))
+                               html_escape(options.title),
+                               html_escape(': ' + filename)))
             output_file.write(HTML_HEAD_END)
 
-            output_file.write(HTML_MENU % (filename.split('/')[-1]))
+            output_file.write(HTML_MENU % html_escape(filename.split('/')[-1]))
             for error in sorted(errors, key=lambda k: k['line']):
-                output_file.write("<a href=\"%s#line-%d\"> %s %s</a>" % (data['htmlfile'], error['line'], error['id'], error['line']))
+                output_file.write("<a href=\"%s#line-%d\"> %s %s</a>" % (html_escape(data['htmlfile']), error['line'], html_escape(error['id']), error['line']))
             output_file.write(HTML_MENU_END)
 
             try:
@@ -926,7 +928,7 @@ def main() -> None:
                 highlight(content, lexer, htmlFormatter).decode(
                     options.source_encoding))
 
-            output_file.write(HTML_FOOTER % contentHandler.versionCppcheck)
+            output_file.write(HTML_FOOTER % html_escape(contentHandler.versionCppcheck))
 
         print('  ' + filename)
 
@@ -971,13 +973,13 @@ def main() -> None:
         for occurrences in reversed(range(cnt_min, cnt_max + 1)):
             for _id in [k for k, v in sorted(counter.items()) if v == occurrences]:
                 stat_html.append(stat_fmt.format(
-                    to_css_selector(_id),
-                    to_css_selector(_id),
+                    html_escape(to_css_selector(_id)),
+                    html_escape(to_css_selector(_id)),
                     dict(counter.most_common())[_id],
-                    _id
+                    html_escape(_id)
                 ))
 
-        output_file.write(HTML_HEAD % (options.title, '', options.title, ''))
+        output_file.write(HTML_HEAD % (html_escape(options.title), '', html_escape(options.title), ''))
         output_file.write(filter_bar(filter_enabled))
         output_file.write(HTML_HEAD_END)
         output_file.write(HTML_MENU.replace('id="menu"', 'id="menu_index"', 1).replace("Defects:", "Defect summary", 1) % (''))
@@ -1006,7 +1008,7 @@ def main() -> None:
         for filename, data in sorted(files.items()):
             file_error = filename in decode_errors or filename.endswith('*')
             is_file = filename != '' and not file_error
-            row_content = filename if file_error else "<a href=\"%s\">%s</a>" % (data['htmlfile'], filename)
+            row_content = html_escape(filename) if file_error else "<a href=\"%s\">%s</a>" % (html_escape(data['htmlfile']), html_escape(filename))
             htmlfile = data.get('htmlfile') if is_file else None
 
             output_file.write("\n      <tbody class=\"fileEntry\">")
@@ -1030,7 +1032,10 @@ def main() -> None:
                 cwe_url = ""
                 try:
                     if error['cwe']:
-                        cwe_url = "<a href=\"https://cwe.mitre.org/data/definitions/" + error['cwe'] + ".html\">" + error['cwe'] + "</a>"
+                        cwe = error['cwe']
+                        cwe_url = '<a href="%s">%s</a>' % (
+                            html_escape("https://cwe.mitre.org/data/definitions/" + quote(cwe, safe="") + ".html"),
+                            html_escape(cwe))
                 except KeyError:
                     pass
 
@@ -1057,7 +1062,7 @@ def main() -> None:
                            htmlfile=htmlfile))
         output_file.write("\n      </tbody>")
         output_file.write('\n       </table>')
-        output_file.write(HTML_FOOTER % contentHandler.versionCppcheck)
+        output_file.write(HTML_FOOTER % html_escape(contentHandler.versionCppcheck))
 
     if decode_errors:
         sys.stderr.write("\nGenerating html failed for the following files: " + ' '.join(decode_errors))
@@ -1084,7 +1089,7 @@ def main() -> None:
 
     with io.open(os.path.join(options.report_dir, 'stats.html'), 'w') as stats_file:
 
-        stats_file.write(HTML_HEAD % (options.title, '', options.title, ': Statistics'))
+        stats_file.write(HTML_HEAD % (html_escape(options.title), '', html_escape(options.title), ': Statistics'))
         stats_file.write(HTML_HEAD_END)
 
         stats_file.write(HTML_MENU.replace('id="menu"', 'id="menu_index"', 1).replace("Defects:", "Back to summary", 1) % (''))
@@ -1122,20 +1127,20 @@ def main() -> None:
                 if it == 0:
                     LENGTH = len(str(i[1]))  # <- length of longest number, now get the difference and try to  make other numbers align to it
 
-                stats_file.write("&#160;" * 3 + str(i[1]) + "&#160;" * (1 + LENGTH - len(str(i[1]))) + "<a href=\"" + files[i[0]]['htmlfile'] + "\">  " + i[0] + "</a><br>\n")
+                stats_file.write("&#160;" * 3 + str(i[1]) + "&#160;" * (1 + LENGTH - len(str(i[1]))) + "<a href=\"" + html_escape(files[i[0]]['htmlfile']) + "\">  " + html_escape(i[0]) + "</a><br>\n")
                 it += 1
                 if it == 10:  # print only the top 10
                     break
             stats_file.write("</p>\n")
 
-        stats_file.write(HTML_FOOTER % contentHandler.versionCppcheck)
+        stats_file.write(HTML_FOOTER % html_escape(contentHandler.versionCppcheck))
 
     if options.checkers_report:
         print("Creating checkers.html (checkers report)\n")
 
         with io.open(os.path.join(options.report_dir, 'checkers.html'), 'w') as checkers_file:
 
-            checkers_file.write(HTML_HEAD % (options.title, '', options.title, ': Checkers'))
+            checkers_file.write(HTML_HEAD % (html_escape(options.title), '', html_escape(options.title), ': Checkers'))
             checkers_file.write(HTML_HEAD_END)
 
             checkers_file.write(HTML_MENU.replace('id="menu"', 'id="menu_index"', 1).replace("Defects:", "Back to summary", 1) % (''))
@@ -1148,7 +1153,7 @@ def main() -> None:
                 checkers_file.write(html_escape(content))
                 checkers_file.write("</pre>\n")
 
-            checkers_file.write(HTML_FOOTER % contentHandler.versionCppcheck)
+            checkers_file.write(HTML_FOOTER % html_escape(contentHandler.versionCppcheck))
 
     print("\nOpen '" + options.report_dir + "/index.html' to see the results.")
 

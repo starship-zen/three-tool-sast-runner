@@ -2,7 +2,7 @@
 
 # 安装 clang-tidy。
 #
-# 默认走 Ubuntu/Debian 包安装（快、可复现）；无 sudo 环境可改为离线解包：
+# 默认走 Ubuntu/Debian 包安装；无 sudo 环境可改为下载并解包（仍需软件包源）：
 #   CLANG_TIDY_INSTALL_MODE=deb bash install/clang_tidy/install.sh
 set -euo pipefail
 

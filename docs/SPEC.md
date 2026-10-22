@@ -255,3 +255,58 @@ target may omit all native YAML. Do not fabricate an empty YAML or a diagnostic
 record. Cppcheck and CSA still require their real native zero-output files.
 Summary validation proves consistency of supplied receipts, not authenticated
 execution, immutable source, vulnerability confirmation or release approval.
+
+## 8. Implemented Runner Safety Contracts (2026-10-22)
+
+### 8.1 Scope
+
+These operational contracts cover installer cleanup, compile-context selection,
+derived HTML and documented configuration. They do not implement section 7's
+downstream exporter, certify product isolation or upgrade analyzer versions.
+
+### 8.2 Entry Points
+
+Use `bash scan/scan_all.sh [--scan-path PATH ...] [--result-path PATH]`.
+Without CLI values, read JSON from `scan/analy.config`; the root template is
+copied there. `bash install/preflight.sh` checks binary availability only.
+
+### 8.3 Input and Ownership Contracts
+
+Configuration accepts only `scan_paths` and `result_path`. Configuration-relative
+paths use the config directory; CLI-relative paths use the current directory.
+Within one database, identical resolved directories and argument vectors for a source may
+deduplicate; differing contexts must not silently select the first record.
+Cppcheck cleanup is limited to safe default directories newly created/extracted
+by that installer run. Explicit overrides, pre-existing and unsafe/symlinked
+directories are retained. `CPPCHECK_CLEAN_AFTER_BUILD=0` disables cleanup.
+Derived HTML escapes untrusted text/attributes without changing native evidence
+or the filesystem paths used to read source files.
+
+### 8.4 Validation and Errors
+
+Malformed/unknown configuration or conflicting compile contexts raises an input
+error (main CLI exit 2), before a scan run is created. A cleanup path that cannot
+be proven safe is kept, not recursively removed. Missing YAML validation support
+cannot be reported as verified evidence; provision PyYAML from `requirements.txt`.
+
+### 8.5 Good, Base and Bad Cases
+
+An ordinary one-context TU runs normally. Repeated identical contexts select one
+TU. Two macro configurations for the same source fail explicitly. A custom build
+directory retains unrelated files. A source filename containing HTML markup is
+rendered as text, not active markup.
+
+### 8.6 Required Regression Checks
+
+`python3 -m unittest discover -s tests` must exercise identical/conflicting
+contexts and ordering, rejection before scan creation, installer-owned versus
+caller-owned/symlinked paths, HTML index/detail/statistics escaping, and loading
+the shipped configuration template with the real parser. Stub-driven tests do
+not establish real analyzer or downstream acceptance.
+
+### 8.7 Wrong versus Correct
+
+Wrong: keep the first macro configuration, delete all contents of a caller's
+build directory, insert a raw filename into HTML, or source the old Shell config.
+Correct: reject conflicting contexts, preserve caller-owned artifacts, escape
+display values, and parse the documented JSON configuration.

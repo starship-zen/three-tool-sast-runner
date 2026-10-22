@@ -22,7 +22,7 @@ usage() {
   可用工具: ${ALL_TOOLS[*]}
 
 安装行为由各工具的环境变量控制，例如：
-  CLANG_TIDY_INSTALL_MODE=deb       无 sudo 时离线解包
+  CLANG_TIDY_INSTALL_MODE=deb       无 sudo 时下载并解包（仍需软件包源）
   CPPCHECK_INSTALL_PREFIX=/opt/tools 自定义 cppcheck 安装前缀
 详见 README.zh-CN.md。
 EOF
