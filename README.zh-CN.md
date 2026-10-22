@@ -111,17 +111,21 @@ bash verify.sh
 
 ## 6. 下游自动化报告生成对接
 
-本执行器产出的自包含证据包，直接由下游离线报告生成器消费：
+下游是独立的 `sast-report-pipeline`。须按 [SPEC 第 7 节](docs/SPEC.zh-CN.md#7-对接下游离线报告生成器)
+生成根清单，包含 v1.2 producer 标记、本地冻结资产和哈希绑定收据；仅有编号目录不能导入。
+clang-tidy 零告警仅可在显式 summary 收据校验通过后省略 YAML，不得伪造 YAML。
 
 ```bash
-# 生成最终版 IEC 62443 合规交付报告（含 10 页 PDF 主报告、HTML/Markdown 附录、CSV、SARIF）
+# 生成待审候选报告包，不等于客户发布批准。
 python3 scripts/three_tool_report.py generate \
   --product <product_id> \
   --manifest "<output_dir>/manifest.json" \
   --output "<report_run_dir>" \
-  --mapping-mode strict \
-  --pdf
+  --mapping-mode strict
 ```
+
+产物是候选报告，不是客户发布或 IEC 62443 认证。命令行 PDF 须另行验收渲染工具链，
+网页工作台当前不支持 PDF。Runner 脚本仍在开发中，文档和下游合成测试不证明其执行已验收。
 
 ---
 

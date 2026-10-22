@@ -74,15 +74,23 @@ three-tool-sast-runner/
 
 ## 5. Downstream Ingestion
 
-The resulting bundle is consumed directly by the offline reporting pipeline:
+The consumer is the standalone `sast-report-pipeline`. Emit the root manifest
+specified in [SPEC section 7](docs/SPEC.md#7-downstream-ingestion-contract),
+including the v1.2 producer marker, local frozen assets and hash-bound receipts.
+Numbered directories alone are not accepted. Zero-warning clang-tidy may omit
+YAML only with the explicit validated summary receipt; do not fabricate YAML.
 ```bash
 python3 scripts/three_tool_report.py generate \
   --product <product_id> \
   --manifest "<output_dir>/manifest.json" \
   --output "<report_run_dir>" \
-  --mapping-mode strict \
-  --pdf
+  --mapping-mode strict
 ```
+
+This produces a candidate, not customer release or IEC 62443 certification.
+CLI PDF requires a separately verified renderer; the web workbench has no PDF
+capability. Current runner scripts remain under implementation, not validated
+by this documentation or the reporting consumer's synthetic tests.
 
 ---
 

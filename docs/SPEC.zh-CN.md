@@ -136,6 +136,9 @@
      * `warnings.by_check` (array)：分项规则统计清单；
      * `files` (array)：记录**每一个 TU 的执行状态**，格式为 `{"file": "相对路径", "status": "ok", "unique_diagnostics": 数量}`。当 `unique_diagnostics == 0` 且 `status == "ok"` 时，即证明该文件已由 Clang-Tidy 成功分析且确认无告警。
 
+对于 v1.2 报告交接，`warnings.raw_total` 与 `by_check[].raw` 统计提交的原生 YAML
+诊断记录条数，不是 CLI 日志中的汇总数字。日志统计如有不同须另行保留，不能替代原生条数。
+
 ### 5.4 Clang Static Analyzer 规范 (`05-clang-static-analyzer/`)
 1. **原生 Plist 强制落盘机制 (`[RAW]` 与零结果机制)：**
    * 调度脚本通过 `clang --analyze` 遍历编译数据库时，必须配置 `-Xclang -analyzer-output=plist -o csa-native/<slug>.plist`。
@@ -167,14 +170,65 @@
 
 ## 7. 对接下游离线报告生成器
 
-当上游扫描工具产出符合本规范的目录包（假设路径为 `/path/to/<product>-scan-bundle/`）后，下游自动化报告生成体系的标准对接流程如下：
+下游是独立的 `sast-report-pipeline` 仓库，不是历史合作方混包适配器。
+仅有编号目录还不是合法输入；Runner 必须同时生成下述根清单。
 
 ```bash
-# 生成最终版合规交付报告（含 10 页 PDF 主报告、HTML/Markdown 附录、CSV、SARIF）
+# 生成待审候选报告包，不等于客户发布批准。
 python3 scripts/three_tool_report.py generate \
-  --product <secp_or_tos_hub> \
+  --product secp \
   --manifest "/path/to/<product>-scan-bundle/manifest.json" \
-  --output "workspaces/mm7-safety/sast/runs/partner-<product>-final" \
-  --mapping-mode strict \
-  --pdf
+  --output "/path/to/new-product-report" \
+  --mapping-mode strict
 ```
+
+PDF 是命令行可选输出，须单独预置并验收渲染工具链。本机网页工作台当前不生成 PDF。
+
+### 7.1 根清单与零诊断交接补充（2026-10-21）
+
+根目录必须包含 `manifest.json`，采用 `schema_version: "three-tool-input-1.0"`
+和 `producer_contract: "three-tool-sast-runner-1.2"`。必需部分包括 `run_id`、
+`project`（含 `product_id`）、`source`、`tool_runs`、`artifacts`、`assets` 与
+`provenance_inputs`。引用路径均相对根目录，并绑定实际 SHA-256。可运行的合成交接
+样例与完整字段示例由 `sast-report-pipeline` 的 `docs/runner-handoff.md` 和
+`examples/runner-handoff/` 维护；它们是测试样例，不是已执行的扫描。
+
+- `artifacts` 只放真实原生 XML/YAML/plist，绑定实际工具、版本、组件、配置、
+  目标及已知源分析单元；缓存和衍生 HTML 不作为原生诊断。
+- 从实际记录填写 `source.repository`、`source.commit`、源码范围和
+  `source.build_configuration_sha256`，用 `purpose: "build-configuration"`
+  保留对应配置原件。如果明确将编译数据库作为构建配置身份，就绑定该文件及其实际哈希，
+  不编造另一个配置哈希。
+- 每项 `tool_runs` 记录实际版本、命令和规则配置哈希，以及各目标的实际起止时间、
+  尝试/完成状态、退出码、结果和选中/完成分析单元；用 `purpose: "rules-configuration"`
+  及匹配身份保留各工具配置。三工具声明的 TU 集合须对账。未知值保持 JSON null，
+  形成不完整候选和发布门禁，不猜测成功。
+  已完成目标须显式提供整数 `units_attempted`、`units_completed`，均等于选中 TU
+  数量；缺少计数不能作为完成证据。
+- 在 `assets` 中绑定冻结标准和规则映射。完整 CWE、CWE Top 25:2025 与
+  OWASP Top 10:2025 是独立视图；运行时不依赖 AI 或在线分类。未知规则不能自动填 N/A。
+- 源码、环境、选中范围和执行收据放入哈希绑定的 `provenance_inputs`，不混作原生诊断。
+  新共同批次的目标 ID 应是实际目标身份，不沿用历史 `new-delivery` / `prior-delivery`
+  收集批次标签。
+
+clang-tidy 目标包含零告警单元时，使用以下显式支持证据条目：
+
+```json
+{
+  "purpose": "supporting-evidence",
+  "evidence_type": "clang-tidy-zero-diagnostic-receipt",
+  "path": "04-clang-tidy/result/clang-tidy-summary.json",
+  "sha256": "<该 summary 原始字节的实际 SHA-256>",
+  "tool": "clang-tidy",
+  "tool_version": "<实际版本；确实未知时用 null>",
+  "component": "<匹配的组件>",
+  "configuration": "<匹配的配置；未知时用 null>",
+  "target": "<匹配的目标>"
+}
+```
+
+这只是模板，不是完整可执行清单。summary 使用 §5.3 的字段，其唯一文件身份、
+选中数量须与声明目标单元一致；成功零诊断行不能与原生诊断矛盾，非零行仍须有可归属 YAML。
+只有全零目标才可完全不提供原生 YAML。不得伪造空 YAML 或诊断记录；Cppcheck 和 CSA
+仍须提供真实原生零结果文件。收据校验只证明所交证据内部一致，不认证执行、源码不可变性、
+漏洞确认或发布批准。
