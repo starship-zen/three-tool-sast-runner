@@ -113,7 +113,15 @@ def scanner_suffixes(scanners):
     return suffixes
 
 
-def plan(paths, source_fallback=False, suffixes=SOURCE_SUFFIXES, ignore_database=False):
+def scanner_ignored_parts(scanners):
+    parts = set()
+    for scanner in scanners:
+        parts.update(getattr(scanner, "IGNORED_PATH_PARTS", ()))
+    return frozenset(parts)
+
+
+def plan(paths, source_fallback=False, suffixes=SOURCE_SUFFIXES, ignore_database=False,
+         ignored_parts=frozenset()):
     databases = {}
     for path in paths:
         try:
@@ -133,7 +141,8 @@ def plan(paths, source_fallback=False, suffixes=SOURCE_SUFFIXES, ignore_database
                 candidates = [scope] if scope.is_file() else scope.rglob("*")
                 sources.update(path.resolve() for path in candidates
                                if path.is_file() and path.suffix.lower() in suffixes
-                               and in_scope(path, scopes))
+                               and in_scope(path, scopes)
+                               and not (ignored_parts & set(path.parts)))
             if not sources:
                 raise ValueError("源码扫描范围未匹配任何源文件")
             groups.append((None, scopes, [{"file": str(path), "directory": str(path.parent),

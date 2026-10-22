@@ -19,6 +19,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -26,6 +27,8 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from csharp_roslyn.reporting import PER_FRAMEWORK_FOLDER, SARIF_NAME, parse_sarif
 
 
 RUNNER_SCHEMA = "three-tool-sast-runner-execution-1.0"
@@ -43,9 +46,25 @@ FORMATS = {
     "clang-tidy": "clang-tidy-yaml",
     "clang-static-analyzer": "csa-plist",
 }
+CSHARP_RUNNER_NAME = "csharp_roslyn"
+CSHARP_TOOL = "dotnet-netanalyzers"
+CSHARP_FORMAT = "csharp-sarif"
+CSHARP_RULES_SCHEMA = "csharp-runner-rules-config-1.0"
+CSHARP_SARIF_RELATIVE = "06-csharp-roslyn/result/" + SARIF_NAME
+CSHARP_ARTIFACT_PREFIX = "06-csharp-roslyn/csharp-artifacts/"
+CSHARP_PER_FRAMEWORK_PREFIX = CSHARP_ARTIFACT_PREFIX + PER_FRAMEWORK_FOLDER + "/"
+CSHARP_RECEIPTS = ("command.txt", "exit-code.txt", "version.txt", "receipt.json", "csharp-reconciliation.csv")
+CSHARP_ANALYZERS = "Microsoft.CodeAnalysis.NetAnalyzers"
+CPP_SUFFIX_LANGUAGES = {".c": "C", ".cc": "C++", ".cpp": "C++", ".cxx": "C++", ".c++": "C++"}
+CSHARP_SUFFIX_LANGUAGES = {".cs": "C#"}
+CPP_LANE_LANGUAGES = ("C", "C++")
+CSHARP_LANE_LANGUAGES = ("C#",)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"(?<![A-Za-z0-9])(?:v)?(\d+(?:\.\d+){1,3})(?![\d.])")
+# A delivery tool_version must be a bare numeric release, matching the
+# receiving contract (`^\d+(?:\.\d+){1,3}$`).
+RELEASE_RE = re.compile(r"^\d+(?:\.\d+){1,3}$")
 PRERELEASE_RE = re.compile(
     r"(?:\bdev\b|\b(?:alpha|beta|pre|rc)\b|\.dev\d*|-(?:alpha|beta|pre|rc)(?:[.-]?\d*)?)",
     re.I,
@@ -233,7 +252,7 @@ def _safe_evidence_file(root: Path, relative_path: Any, label: str) -> Path:
     return current
 
 
-def _validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
+def _validate_profile(profile: dict[str, Any], lane_languages: tuple[str, ...]) -> dict[str, Any]:
     required = {
         "schema_version", "product_id", "display_name", "repository", "component_id",
         "target_id", "configuration", "included_paths", "excluded_paths", "languages",
@@ -271,12 +290,13 @@ def _validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
             raise HandoffError("product profile " + field + " must be an explicit string array")
         if len(values) != len(set(values)):
             raise HandoffError("product profile " + field + " contains duplicate values")
-    if not profile["languages"] or any(item not in {"C", "C++"} for item in profile["languages"]):
-        raise HandoffError("this delivery lane supports explicit C and/or C++ scope only")
+    if not profile["languages"] or any(item not in lane_languages for item in profile["languages"]):
+        raise HandoffError("this delivery lane supports explicit " + " and/or ".join(lane_languages) + " scope only")
     return profile
 
 
-def _version_record(run_root: Path, entry: Any, name: str) -> tuple[dict[str, Any], bytes, bytes, str, str]:
+def _version_record(run_root: Path, entry: Any, name: str,
+                    minimum: tuple[int, ...] | None) -> tuple[dict[str, Any], bytes, bytes, str, str]:
     if (not isinstance(entry, dict) or type(entry.get("exit_code")) is not int or entry["exit_code"] != 0
             or entry.get("cancelled") is not False or entry.get("timed_out") is not False):
         raise HandoffError("missing successful captured version command for " + name)
@@ -300,11 +320,11 @@ def _version_record(run_root: Path, entry: Any, name: str) -> tuple[dict[str, An
     if not match:
         raise HandoffError("cannot parse a stable numeric release token for " + name)
     token = match.group(1)
-    parts = tuple(int(part) for part in token.split("."))
-    minimum = (2, 22) if name == "cppcheck" else (14, 0)
-    width = max(len(parts), len(minimum))
-    if parts + (0,) * (width - len(parts)) < minimum + (0,) * (width - len(minimum)):
-        raise HandoffError("tool version is below the runner evidence gate for " + name)
+    if minimum is not None:
+        parts = tuple(int(part) for part in token.split("."))
+        width = max(len(parts), len(minimum))
+        if parts + (0,) * (width - len(parts)) < minimum + (0,) * (width - len(minimum)):
+            raise HandoffError("tool version is below the runner evidence gate for " + name)
     return entry, stdout, stderr, text, token
 
 
@@ -382,6 +402,98 @@ def _provenance(path: str, digest: str, purpose: str, **identity: Any) -> dict[s
     return {"path": path, "sha256": digest, "purpose": purpose, **identity}
 
 
+def _selected_units(group: dict[str, Any]) -> list[str]:
+    selected = group.get("selected_files")
+    if (not isinstance(selected, list) or not selected or len(selected) > MAX_UNITS
+            or any(not isinstance(item, str) or not Path(item).is_absolute() for item in selected)
+            or len(selected) != len(set(selected))):
+        raise HandoffError("runner selected-file inventory is missing, non-absolute or duplicated")
+    return selected
+
+
+def _captured_git_baseline(group: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str, str]:
+    baseline = group.get("baseline")
+    if not isinstance(baseline, dict) or not isinstance(baseline.get("git"), dict):
+        raise HandoffError("run lacks a captured Git baseline")
+    git = baseline["git"]
+    commit = git.get("commit")
+    repo_root = git.get("repo")
+    if not git.get("ok") or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise HandoffError("run lacks a valid captured Git commit")
+    if str(git.get("status", "")).strip() or str(git.get("diff", "")).strip():
+        raise HandoffError("product delivery requires a clean captured Git baseline")
+    source_root = baseline.get("root")
+    if (not isinstance(repo_root, str) or not Path(repo_root).is_absolute()
+            or ".." in Path(repo_root).parts or not isinstance(source_root, str)
+            or not Path(source_root).is_absolute() or ".." in Path(source_root).parts):
+        raise HandoffError("captured source root or Git repository root is missing or invalid")
+    try:
+        source_scope = Path(source_root).relative_to(Path(repo_root))
+    except ValueError as error:
+        raise HandoffError("captured source root is outside the Git repository") from error
+    if ".." in source_scope.parts:
+        raise HandoffError("captured source root is outside the Git repository")
+    return baseline, git, commit, repo_root
+
+
+def _profile_units(selected: list[str], repo_root: str, profile: dict[str, Any],
+                  suffix_languages: dict[str, str], language_label: str) -> dict[str, str]:
+    relative_units: dict[str, str] = {}
+    for unit in selected:
+        try:
+            relative = Path(unit).relative_to(Path(repo_root)).as_posix()
+        except ValueError as error:
+            raise HandoffError("a selected translation unit is outside the captured Git repository") from error
+        if not relative or ".." in Path(relative).parts:
+            raise HandoffError("selected source path cannot be represented relative to the captured Git root")
+        if not any(fnmatch.fnmatchcase(relative, pattern) for pattern in profile["included_paths"]):
+            raise HandoffError("selected source falls outside the explicit product-profile include scope: " + relative)
+        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in profile["excluded_paths"]):
+            raise HandoffError("selected source also matches an explicit product-profile exclusion: " + relative)
+        language = suffix_languages.get(Path(relative).suffix.lower())
+        if language is None or language not in profile["languages"]:
+            raise HandoffError("selected source extension is outside the explicit " + language_label + " profile: " + relative)
+        relative_units[unit] = relative
+    return relative_units
+
+
+def _captured_source_hashes(baseline: dict[str, Any], selected: list[str]) -> dict[str, str]:
+    source_hashes = baseline.get("sources")
+    if not isinstance(source_hashes, dict) or set(source_hashes) != set(selected):
+        raise HandoffError("captured source-hash inventory does not exactly match selected units")
+    if any(not isinstance(source_hashes[unit], str) or not SHA_RE.fullmatch(source_hashes[unit]) for unit in selected):
+        raise HandoffError("captured source hashes are incomplete")
+    return source_hashes
+
+
+def _verify_evidence_artifacts(evidence_root: Path, listed: Any) -> tuple[dict[str, Path], dict[str, str], dict[str, int]]:
+    if not isinstance(listed, list) or not listed or len(listed) > MAX_FILES:
+        raise HandoffError("runner evidence manifest has no valid artifact inventory")
+    evidence_files: dict[str, Path] = {}
+    evidence_hashes: dict[str, str] = {}
+    evidence_sizes: dict[str, int] = {}
+    total = 0
+    for item in listed:
+        if not isinstance(item, dict) or not SHA_RE.fullmatch(str(item.get("sha256", ""))):
+            raise HandoffError("runner evidence manifest has an invalid artifact record")
+        relative = item.get("path")
+        path = _safe_evidence_file(evidence_root, relative, "runner evidence artifact")
+        digest, size = _sha256_file(path, "runner evidence artifact " + relative)
+        if type(item.get("size")) is not int or item["size"] != size:
+            raise HandoffError("runner evidence artifact size differs from its captured inventory: " + relative)
+        if digest != item["sha256"]:
+            raise HandoffError("runner evidence artifact SHA-256 mismatch: " + relative)
+        if relative in evidence_files:
+            raise HandoffError("runner evidence manifest repeats an artifact path")
+        total += size
+        if total > MAX_TOTAL_BYTES:
+            raise HandoffError("runner evidence bundle exceeds the maximum supported total size")
+        evidence_files[relative] = path
+        evidence_hashes[relative] = digest
+        evidence_sizes[relative] = size
+    return evidence_files, evidence_hashes, evidence_sizes
+
+
 def _validate_run(run_root: Path, profile: dict[str, Any]) -> dict[str, Any]:
     run_manifest, run_manifest_raw = _load_json(run_root / "manifest.json", "runner execution manifest")
     run_id = run_manifest.get("run_id")
@@ -409,55 +521,10 @@ def _validate_run(run_root: Path, profile: dict[str, Any]) -> dict[str, Any]:
     if group.get("report_error") or group.get("evidence_error"):
         raise HandoffError("runner has a report or evidence error")
 
-    selected = group.get("selected_files")
-    if (not isinstance(selected, list) or not selected or len(selected) > MAX_UNITS
-            or any(not isinstance(item, str) or not Path(item).is_absolute() for item in selected)
-            or len(selected) != len(set(selected))):
-        raise HandoffError("runner selected-file inventory is missing, non-absolute or duplicated")
-    baseline = group.get("baseline")
-    if not isinstance(baseline, dict) or not isinstance(baseline.get("git"), dict):
-        raise HandoffError("run lacks a captured Git baseline")
-    git = baseline["git"]
-    commit = git.get("commit")
-    repo_root = git.get("repo")
-    if not git.get("ok") or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
-        raise HandoffError("run lacks a valid captured Git commit")
-    if str(git.get("status", "")).strip() or str(git.get("diff", "")).strip():
-        raise HandoffError("product delivery requires a clean captured Git baseline")
-    source_root = baseline.get("root")
-    if (not isinstance(repo_root, str) or not Path(repo_root).is_absolute()
-            or ".." in Path(repo_root).parts or not isinstance(source_root, str)
-            or not Path(source_root).is_absolute() or ".." in Path(source_root).parts):
-        raise HandoffError("captured source root or Git repository root is missing or invalid")
-    try:
-        source_scope = Path(source_root).relative_to(Path(repo_root))
-    except ValueError as error:
-        raise HandoffError("captured source root is outside the Git repository") from error
-    if ".." in source_scope.parts:
-        raise HandoffError("captured source root is outside the Git repository")
-
-    relative_units: dict[str, str] = {}
-    for unit in selected:
-        try:
-            relative = Path(unit).relative_to(Path(repo_root)).as_posix()
-        except ValueError as error:
-            raise HandoffError("a selected translation unit is outside the captured Git repository") from error
-        if not relative or ".." in Path(relative).parts:
-            raise HandoffError("selected source path cannot be represented relative to the captured Git root")
-        if not any(fnmatch.fnmatchcase(relative, pattern) for pattern in profile["included_paths"]):
-            raise HandoffError("selected source falls outside the explicit product-profile include scope: " + relative)
-        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in profile["excluded_paths"]):
-            raise HandoffError("selected source also matches an explicit product-profile exclusion: " + relative)
-        suffix = Path(relative).suffix.lower()
-        language = "C" if suffix == ".c" else "C++" if suffix in {".cc", ".cpp", ".cxx", ".c++"} else None
-        if language is None or language not in profile["languages"]:
-            raise HandoffError("selected source extension is outside the explicit C/C++ profile: " + relative)
-        relative_units[unit] = relative
-    source_hashes = baseline.get("sources")
-    if not isinstance(source_hashes, dict) or set(source_hashes) != set(selected):
-        raise HandoffError("captured source-hash inventory does not exactly match selected units")
-    if any(not isinstance(source_hashes[unit], str) or not SHA_RE.fullmatch(source_hashes[unit]) for unit in selected):
-        raise HandoffError("captured source hashes are incomplete")
+    selected = _selected_units(group)
+    baseline, _git, commit, repo_root = _captured_git_baseline(group)
+    relative_units = _profile_units(selected, repo_root, profile, CPP_SUFFIX_LANGUAGES, "C/C++")
+    source_hashes = _captured_source_hashes(baseline, selected)
 
     if group.get("evidence_bundle") != "group-1/evidence-bundle":
         raise HandoffError("runner evidence bundle path does not match the one-group run layout")
@@ -471,31 +538,8 @@ def _validate_run(run_root: Path, profile: dict[str, Any]) -> dict[str, Any]:
         raise HandoffError("runner evidence manifest is not a native scanner-evidence-1 execution bundle")
     if evidence_manifest.get("commit") != commit or evidence_manifest.get("selected_files") != selected:
         raise HandoffError("evidence manifest contradicts the captured source baseline")
-    listed = evidence_manifest.get("artifacts")
-    if not isinstance(listed, list) or not listed or len(listed) > MAX_FILES:
-        raise HandoffError("runner evidence manifest has no valid artifact inventory")
-    evidence_files: dict[str, Path] = {}
-    evidence_hashes: dict[str, str] = {}
-    evidence_sizes: dict[str, int] = {}
-    total = 0
-    for item in listed:
-        if not isinstance(item, dict) or not SHA_RE.fullmatch(str(item.get("sha256", ""))):
-            raise HandoffError("runner evidence manifest has an invalid artifact record")
-        relative = item.get("path")
-        path = _safe_evidence_file(evidence_root, relative, "runner evidence artifact")
-        digest, size = _sha256_file(path, "runner evidence artifact " + relative)
-        if type(item.get("size")) is not int or item["size"] != size:
-            raise HandoffError("runner evidence artifact size differs from its captured inventory: " + relative)
-        if digest != item["sha256"]:
-            raise HandoffError("runner evidence artifact SHA-256 mismatch: " + relative)
-        if relative in evidence_files:
-            raise HandoffError("runner evidence manifest repeats an artifact path")
-        total += size
-        if total > MAX_TOTAL_BYTES:
-            raise HandoffError("runner evidence bundle exceeds the maximum supported total size")
-        evidence_files[relative] = path
-        evidence_hashes[relative] = digest
-        evidence_sizes[relative] = size
+    evidence_files, evidence_hashes, evidence_sizes = _verify_evidence_artifacts(
+        evidence_root, evidence_manifest.get("artifacts"))
 
     gate_path = evidence_files.get("release-gate.json")
     if gate_path is None:
@@ -542,7 +586,8 @@ def _validate_run(run_root: Path, profile: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(versions, dict):
         raise HandoffError("runner has no captured scanner version receipts")
     for name in ("cppcheck", "clang-tidy", "clang", "clang++"):
-        record, stdout, stderr, text, token = _version_record(run_root, versions.get(name), name)
+        record, stdout, stderr, text, token = _version_record(
+            run_root, versions.get(name), name, (2, 22) if name == "cppcheck" else (14, 0))
         version_records[name] = record
         version_raw[name] = (stdout, stderr, text, token)
         version_tokens[name] = token
@@ -790,6 +835,396 @@ def _validate_run(run_root: Path, profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _csharp_driver(run: Any) -> dict[str, Any] | None:
+    tool = run.get("tool") if isinstance(run, dict) else None
+    driver = tool.get("driver") if isinstance(tool, dict) else None
+    if not isinstance(driver, dict):
+        return None
+    # Roslyn reports the C# compiler as the SARIF driver: a descriptive `version`
+    # (for example "4.11.0-3.24510.3 (cfe3bd0a)"), a `semanticVersion` release
+    # and a dotted quad file version. None of them identifies the NetAnalyzers
+    # build that produced the CA diagnostics, so they stay compiler provenance.
+    return {
+        "name": driver.get("name") if isinstance(driver.get("name"), str) else None,
+        "version": driver.get("version") if isinstance(driver.get("version"), str) else None,
+        "semantic_version": (driver.get("semanticVersion")
+                             if isinstance(driver.get("semanticVersion"), str) else None),
+        "dotted_quad_file_version": (driver.get("dottedQuadFileVersion")
+                                     if isinstance(driver.get("dottedQuadFileVersion"), str) else None),
+    }
+
+
+def _csharp_sarif(path: Path) -> dict[str, Any]:
+    document, _raw = _load_json(path, "C# SARIF report", MAX_NATIVE_BYTES)
+    if document.get("version") != "2.1.0":
+        raise HandoffError("C# SARIF report must declare SARIF version 2.1.0")
+    runs = document.get("runs")
+    if not isinstance(runs, list) or not runs:
+        raise HandoffError("C# SARIF report must contain at least one run")
+    try:
+        diagnostics = parse_sarif(path)
+    except (OSError, ValueError) as error:
+        raise HandoffError("C# SARIF report is not valid SARIF 2.1.0: " + str(error)) from error
+    details = []
+    for run in runs:
+        if not isinstance(run, dict) or not isinstance(run.get("results"), list):
+            raise HandoffError("C# SARIF run must contain a results array")
+        properties = run.get("properties") if isinstance(run.get("properties"), dict) else {}
+        framework = properties.get("targetFramework")
+        details.append({"target_framework": framework if isinstance(framework, str) and framework else None,
+                        "driver": _csharp_driver(run)})
+    return {"runs": len(runs), "diagnostics": len(diagnostics), "details": details}
+
+
+def _verify_post_scan_git_receipts(evidence_files: dict[str, Path], git: dict[str, Any]) -> None:
+    expected = {"commit": git["commit"],
+                "status": str(git.get("status", "")).strip(),
+                "diff": str(git.get("diff", "")).strip()}
+    for name, value in expected.items():
+        relative = "01-metadata/after-git-" + name + ".txt"
+        path = evidence_files.get(relative)
+        if path is None:
+            raise HandoffError("captured post-scan Git receipt is missing: " + relative)
+        captured = _read_file(path, "post-scan Git " + name + " receipt", MAX_VERSION_TEXT_BYTES)
+        if captured.decode("utf-8", errors="replace").strip() != value:
+            raise HandoffError("Git baseline changed during scan: " + relative)
+
+
+def _csharp_project(receipt: dict[str, Any]) -> str:
+    project = receipt.get("project")
+    if (not isinstance(project, str) or not project or not Path(project).is_absolute()
+            or ".." in Path(project).parts):
+        raise HandoffError("C# scanner receipt lacks an absolute project file identity")
+    return project
+
+
+def _csharp_build_configuration(project: str, repo_root: str) -> Path:
+    project_path = Path(project)
+    try:
+        project_path.relative_to(Path(repo_root))
+    except ValueError as error:
+        raise HandoffError("C# project file is outside the captured Git repository") from error
+    candidate: Path | None = project_path if project_path.suffix == ".csproj" else None
+    if candidate is None:
+        root = Path(repo_root)
+        folder = project_path.parent
+        while True:
+            props = folder / "Directory.Build.props"
+            if props.is_file():
+                candidate = props
+                break
+            if folder == root or folder.parent == folder:
+                break
+            folder = folder.parent
+    if candidate is None:
+        raise HandoffError("C# delivery requires a .csproj or Directory.Build.props as its build configuration")
+    _reject_symlink_components(candidate, "C# build configuration")
+    return candidate
+
+
+def _csharp_builds(evidence_files: dict[str, Path], receipt: dict[str, Any],
+                   sarif: dict[str, Any]) -> list[dict[str, Any]]:
+    builds = receipt.get("builds")
+    if not isinstance(builds, list) or not builds or len(builds) > MAX_UNITS:
+        raise HandoffError("C# scanner receipt lacks per-target-framework build receipts")
+    frameworks = [detail["target_framework"] for detail in sarif["details"]]
+    if len(builds) != len(frameworks):
+        raise HandoffError("C# build receipts and SARIF runs disagree on the target framework count")
+    declared = receipt.get("target_frameworks")
+    if not isinstance(declared, list) or sorted(map(str, declared)) != sorted(frameworks):
+        raise HandoffError("C# scanner receipt target frameworks differ from the SARIF runs")
+    validated = []
+    seen: set[str] = set()
+    total = 0
+    for build in builds:
+        if not isinstance(build, dict):
+            raise HandoffError("C# build receipt is not an object")
+        framework = build.get("target_framework")
+        if not isinstance(framework, str) or not framework or framework in seen or framework not in frameworks:
+            raise HandoffError("C# build receipt does not name a unique built target framework")
+        seen.add(framework)
+        command = build.get("command")
+        if (not isinstance(command, list) or not command
+                or any(not isinstance(item, str) or not item for item in command)):
+            raise HandoffError("C# build receipt lacks its executed command for " + framework)
+        if "-p:TargetFramework=" + framework not in command:
+            raise HandoffError("C# build command does not bind target framework " + framework)
+        if type(build.get("exit_code")) is not int or build["exit_code"] != 0:
+            raise HandoffError("C# target framework build did not exit successfully: " + framework)
+        if build.get("timed_out") or build.get("cancelled"):
+            raise HandoffError("C# target framework build timed out or was cancelled: " + framework)
+        if not isinstance(build.get("started"), str) or not isinstance(build.get("finished"), str):
+            raise HandoffError("C# target framework build timestamps are incomplete: " + framework)
+        items = build.get("compile_items")
+        if (not isinstance(items, list) or not items or len(items) > MAX_UNITS
+                or any(not isinstance(item, str) or not Path(item).is_absolute() for item in items)
+                or len(items) != len(set(items))):
+            raise HandoffError("C# build receipt lacks its Compile compilation units: " + framework)
+        if (not _is_count(build.get("units_attempted")) or not _is_count(build.get("units_completed"))
+                or build["units_attempted"] != len(items) or build["units_completed"] != len(items)):
+            raise HandoffError("C# build receipt counts do not match its Compile units: " + framework)
+        name = Path(str(build.get("sarif") or "")).name
+        path = evidence_files.get(CSHARP_PER_FRAMEWORK_PREFIX + name) if name else None
+        if path is None:
+            raise HandoffError("C# per-target-framework SARIF is missing: " + framework)
+        digest, _size = _sha256_file(path, "C# per-target-framework SARIF")
+        if digest != build.get("sarif_sha256"):
+            raise HandoffError("C# per-target-framework SARIF differs from the scanned bytes: " + framework)
+        try:
+            native = len(parse_sarif(path))
+        except (OSError, ValueError) as error:
+            raise HandoffError("C# per-target-framework SARIF is invalid: " + str(error)) from error
+        if type(build.get("diagnostics")) is not int or build["diagnostics"] != native:
+            raise HandoffError("C# per-target-framework diagnostic count differs from its SARIF: " + framework)
+        total += native
+        validated.append({**build, "diagnostics": native})
+    if total != sarif["diagnostics"] or receipt.get("diagnostics") != total:
+        raise HandoffError("C# SARIF diagnostics do not reconcile with the per-framework receipts")
+    return validated
+
+
+def _csharp_analyzers(receipt: dict[str, Any]) -> dict[str, Any]:
+    analyzers = receipt.get("analyzers")
+    if not isinstance(analyzers, dict) or analyzers.get("name") != CSHARP_ANALYZERS:
+        raise HandoffError("C# scanner receipt lacks a " + CSHARP_ANALYZERS + " identity")
+    limitations = analyzers.get("limitations")
+    if not isinstance(limitations, list) or any(not isinstance(item, str) or not item for item in limitations):
+        raise HandoffError("C# analyzer identity limitations are invalid")
+    version = analyzers.get("version")
+    source = analyzers.get("source")
+    if version is None:
+        # An unresolved analyzer build stays explicitly unknown; the C# compiler
+        # version is never substituted for it.
+        if not limitations:
+            raise HandoffError("C# analyzer version is unknown without a recorded limitation")
+    else:
+        if not isinstance(version, str) or not RELEASE_RE.fullmatch(version.strip()):
+            raise HandoffError("C# analyzer version is not a canonical numeric release")
+        version = version.strip()
+        if not isinstance(source, str) or not source:
+            raise HandoffError("C# analyzer version lacks its resolution source")
+    return {"name": CSHARP_ANALYZERS, "version": version, "source": source,
+            "limitations": list(limitations)}
+
+
+def _csharp_reconciliation(evidence_files: dict[str, Path],
+                           builds: list[dict[str, Any]]) -> dict[str, set[str]]:
+    captured = _read_file(evidence_files[CSHARP_ARTIFACT_PREFIX + "csharp-reconciliation.csv"],
+                          "C# reconciliation CSV", MAX_JSON_BYTES)
+    try:
+        with io.StringIO(captured.decode("utf-8"), newline="") as stream:
+            reader = csv.DictReader(stream)
+            if reader.fieldnames != ["tfm", "file", "status"]:
+                raise HandoffError("C# reconciliation CSV columns must be tfm,file,status")
+            rows = list(reader)
+    except (UnicodeDecodeError, csv.Error) as error:
+        raise HandoffError("C# reconciliation CSV is invalid") from error
+    frameworks = {build["target_framework"] for build in builds}
+    analyzed: dict[str, set[str]] = {}
+    pairs: set[tuple[str, str]] = set()
+    for row in rows:
+        framework = row.get("tfm")
+        unit = row.get("file")
+        status = row.get("status")
+        if not isinstance(unit, str) or not Path(unit).is_absolute():
+            raise HandoffError("C# reconciliation CSV contains a non-absolute unit path")
+        if status == "analyzed":
+            if framework not in frameworks:
+                raise HandoffError("C# reconciliation CSV names an unbuilt target framework")
+            if (framework, unit) in pairs:
+                raise HandoffError("C# reconciliation CSV repeats a compilation unit")
+            pairs.add((framework, unit))
+            analyzed.setdefault(framework, set()).add(unit)
+        elif status == "discovered":
+            # Directory enumeration is not a compilation unit and never counts as
+            # completed analysis.
+            if framework:
+                raise HandoffError("C# reconciliation CSV discovered rows must not name a target framework")
+        else:
+            raise HandoffError("C# reconciliation CSV records an incomplete compilation unit")
+    return analyzed
+
+
+def _validate_csharp_run(run_root: Path, profile: dict[str, Any]) -> dict[str, Any]:
+    run_manifest, run_manifest_raw = _load_json(run_root / "manifest.json", "runner execution manifest")
+    run_id = run_manifest.get("run_id")
+    if run_manifest.get("runner_schema") != RUNNER_SCHEMA:
+        raise HandoffError("runner execution manifest lacks the canonical exporter marker")
+    if (not isinstance(run_id, str) or not ID_RE.fullmatch(run_id) or run_root.name != run_id
+            or Path(str(run_manifest.get("run_path", ""))).name != run_id):
+        raise HandoffError("runner execution run_id does not match its output directory identity")
+    if (run_manifest.get("ok") is not True or type(run_manifest.get("exit_code")) is not int
+            or run_manifest["exit_code"] != 0):
+        raise HandoffError("failed or incomplete scanner execution cannot be exported as a complete delivery")
+    if run_manifest.get("cancelled") or run_manifest.get("error"):
+        raise HandoffError("cancelled or errored runner execution cannot be exported")
+    if (run_manifest.get("tools") != [CSHARP_RUNNER_NAME]
+            or run_manifest.get("evidence_gate_required") is not False):
+        raise HandoffError("a C# delivery requires a C#-only runner execution of the C# scanner lane")
+    if run_manifest.get("downstream_compatible") is not False or run_manifest.get("release_ready") is not False:
+        raise HandoffError("runner evidence must not claim consumer compatibility or release readiness")
+
+    groups = run_manifest.get("groups")
+    if not isinstance(groups, list) or len(groups) != 1:
+        raise HandoffError("one product delivery requires exactly one scan group")
+    group = groups[0]
+    if not isinstance(group, dict) or group.get("mode") != "source" or group.get("database"):
+        raise HandoffError("the C# delivery lane requires a source-scope run without a compilation database")
+    if group.get("report_error") or group.get("evidence_error"):
+        raise HandoffError("runner has a report or evidence error")
+
+    selected = _selected_units(group)
+    baseline, git, commit, repo_root = _captured_git_baseline(group)
+    relative_units = _profile_units(selected, repo_root, profile, CSHARP_SUFFIX_LANGUAGES, "C#")
+    source_hashes = _captured_source_hashes(baseline, selected)
+
+    if group.get("evidence_bundle") != "group-1/evidence-bundle":
+        raise HandoffError("runner evidence bundle path does not match the one-group run layout")
+    evidence_root = run_root / "group-1/evidence-bundle"
+    _reject_symlink_components(evidence_root, "runner evidence bundle")
+    evidence_manifest, evidence_manifest_raw = _load_json(evidence_root / "manifest.json", "runner evidence manifest")
+    if (evidence_manifest.get("schema") != "scanner-evidence-1"
+            or evidence_manifest.get("target_contract") != "three-tool-input-1.0"
+            or evidence_manifest.get("downstream_compatible") is not False
+            or evidence_manifest.get("release_ready") is not False):
+        raise HandoffError("runner evidence manifest is not a native scanner-evidence-1 execution bundle")
+    if evidence_manifest.get("commit") != commit or evidence_manifest.get("selected_files") != selected:
+        raise HandoffError("evidence manifest contradicts the captured source baseline")
+    evidence_files, evidence_hashes, evidence_sizes = _verify_evidence_artifacts(
+        evidence_root, evidence_manifest.get("artifacts"))
+    _verify_post_scan_git_receipts(evidence_files, git)
+
+    gate_path = evidence_files.get("release-gate.json")
+    if gate_path is None:
+        raise HandoffError("captured release gate is missing")
+    gate, gate_raw = _load_json(gate_path, "runner evidence release gate")
+    if (gate.get("release_ready") is not False or group.get("release_gate") != gate
+            or evidence_manifest.get("release_gate") != gate):
+        raise HandoffError("runner evidence gate is inconsistent or claims release readiness")
+    checks = gate.get("checks")
+    if not isinstance(checks, dict) or set(checks) != {CSHARP_RUNNER_NAME}:
+        raise HandoffError("the C# evidence gate does not contain exactly the C# scanner check")
+    csharp_check = checks[CSHARP_RUNNER_NAME]
+    if not isinstance(csharp_check, dict) or csharp_check.get("errors") != []:
+        raise HandoffError("the C# evidence check reports errors: "
+                           + "; ".join(map(str, csharp_check.get("errors", []))))
+    if set(csharp_check.get("files", [])) != set(selected):
+        raise HandoffError("the C# evidence gate does not reconcile selected source units")
+    if evidence_hashes.get("release-gate.json") != _sha256_bytes(gate_raw):
+        raise HandoffError("release gate bytes differ from the captured evidence inventory")
+
+    source_receipt_path = evidence_files.get("01-metadata/source-hashes.json")
+    if source_receipt_path is None:
+        raise HandoffError("captured source-hash receipt is missing")
+    captured_source_hashes, _ = _load_json(source_receipt_path, "source-hash receipt")
+    if captured_source_hashes != source_hashes:
+        raise HandoffError("captured source hash receipt differs from the execution manifest")
+
+    sarif_path = evidence_files.get(CSHARP_SARIF_RELATIVE)
+    sarif_inventory = {name for name in evidence_files
+                       if name.startswith("06-csharp-roslyn/result/") and name.endswith(".sarif")}
+    if sarif_path is None or sarif_inventory != {CSHARP_SARIF_RELATIVE}:
+        raise HandoffError("expected exactly one C# SARIF report at " + CSHARP_SARIF_RELATIVE)
+    sarif = _csharp_sarif(sarif_path)
+    frameworks = [detail["target_framework"] for detail in sarif["details"]]
+    if any(framework is None for framework in frameworks) or len(set(frameworks)) != len(frameworks):
+        raise HandoffError("C# SARIF must declare one uniquely attributed run per target framework")
+    drivers = [detail["driver"] for detail in sarif["details"]]
+    if any(driver is None for driver in drivers):
+        raise HandoffError("C# SARIF runs must declare their compiler driver")
+    compiler_versions = {driver["version"] for driver in drivers}
+    compiler_semantic = {driver["semantic_version"] for driver in drivers}
+    if (len(compiler_versions) != 1 or len(compiler_semantic) != 1
+            or None in compiler_versions or None in compiler_semantic):
+        raise HandoffError("C# SARIF runs must agree on one C# compiler identity")
+
+    for name in CSHARP_RECEIPTS:
+        if CSHARP_ARTIFACT_PREFIX + name not in evidence_files:
+            raise HandoffError("C# evidence receipt is missing: " + name)
+    receipt, _ = _load_json(evidence_files[CSHARP_ARTIFACT_PREFIX + "receipt.json"],
+                            "C# scanner execution receipt")
+    results = group.get("results")
+    if not isinstance(results, dict) or set(results) != {CSHARP_RUNNER_NAME}:
+        raise HandoffError("a C# delivery requires exactly the C# scanner execution receipt")
+    result = results[CSHARP_RUNNER_NAME]
+    if (not isinstance(result, dict) or result.get("ok") is not True or receipt.get("ok") is not True
+            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or type(result.get("exit_code")) is not int or result["exit_code"] != 0):
+        raise HandoffError("C# scanner execution did not complete successfully")
+    if type(receipt.get("diagnostics")) is not int or receipt["diagnostics"] != sarif["diagnostics"]:
+        raise HandoffError("C# SARIF diagnostic count differs from the scanner receipt")
+    if result.get("diagnostics") != receipt["diagnostics"]:
+        raise HandoffError("C# scanner receipt differs from the execution manifest")
+    started = receipt.get("started")
+    completed = receipt.get("finished")
+    if not isinstance(started, str) or not isinstance(completed, str):
+        raise HandoffError("C# scanner execution timestamps are incomplete")
+    builds = _csharp_builds(evidence_files, receipt, sarif)
+    command = builds[0]["command"]
+    analyzers = _csharp_analyzers(receipt)
+
+    versions = run_manifest.get("versions")
+    if not isinstance(versions, dict):
+        raise HandoffError("runner has no captured scanner version receipts")
+    version_record, stdout, stderr, _text, version_token = _version_record(
+        run_root, versions.get("dotnet"), "dotnet", None)
+    if version_record["command"][0] != command[0]:
+        raise HandoffError("C# build command does not use the captured dotnet binary")
+    command_receipt = _read_file(evidence_files[CSHARP_ARTIFACT_PREFIX + "command.txt"],
+                                 "C# command receipt", MAX_VERSION_TEXT_BYTES)
+    if command_receipt.decode("utf-8", errors="replace").strip() != "\n".join(
+            shlex.join(build["command"]) for build in builds):
+        raise HandoffError("C# command receipt differs from the scanner receipt")
+    exit_receipt = _read_file(evidence_files[CSHARP_ARTIFACT_PREFIX + "exit-code.txt"],
+                              "C# exit-code receipt", MAX_VERSION_TEXT_BYTES)
+    if exit_receipt.decode("utf-8", errors="replace").strip() != "\n".join(
+            "{} {}".format(build["target_framework"], build["exit_code"]) for build in builds):
+        raise HandoffError("C# exit-code receipt does not reconcile the per-framework exits")
+    version_receipt = _read_file(evidence_files[CSHARP_ARTIFACT_PREFIX + "version.txt"],
+                                 "C# version receipt", MAX_VERSION_TEXT_BYTES)
+    if version_receipt != stdout:
+        raise HandoffError("C# version receipt differs from the captured dotnet version banner")
+    metadata_version = evidence_files.get("01-metadata/dotnet.version.stdout.txt")
+    if metadata_version is None:
+        raise HandoffError("captured dotnet version banner is missing from the evidence bundle")
+    if _read_file(metadata_version, "captured dotnet version banner", MAX_VERSION_TEXT_BYTES) != stdout:
+        raise HandoffError("captured dotnet version banner differs from the execution manifest")
+
+    compiled = {build["target_framework"]: set(build["compile_items"]) for build in builds}
+    analyzed = _csharp_reconciliation(evidence_files, builds)
+    for framework, units in compiled.items():
+        if analyzed.get(framework) != units:
+            raise HandoffError("C# reconciliation CSV differs from the " + framework
+                               + " Compile compilation units")
+    covered = {unit for units in analyzed.values() for unit in units}
+    uncovered = [unit for unit in selected if unit not in covered]
+    if uncovered:
+        raise HandoffError("C# selected source units are not compiled by any target framework: "
+                           + ", ".join(uncovered[:5]))
+
+    project = _csharp_project(receipt)
+    build_path = _csharp_build_configuration(project, repo_root)
+    build_configuration = _read_file(build_path, "C# build configuration")
+
+    return {
+        "run_id": run_id, "run_manifest": run_manifest, "run_manifest_raw": run_manifest_raw,
+        "group": group, "selected": selected, "relative_units": relative_units,
+        "source_hashes": source_hashes, "commit": commit, "repository_root": repo_root,
+        "evidence_root": evidence_root, "evidence_manifest_raw": evidence_manifest_raw,
+        "evidence_files": evidence_files, "evidence_hashes": evidence_hashes,
+        "evidence_sizes": evidence_sizes, "gate": gate, "gate_raw": gate_raw,
+        "results": results, "receipt": receipt,
+        "version": version_record, "version_stdout": stdout, "version_stderr": stderr,
+        "version_token": version_token, "sarif": sarif, "builds": builds,
+        "analyzers": analyzers, "compiled": compiled, "analyzed": analyzed,
+        "compiler": {"semantic_version": next(iter(compiler_semantic)),
+                     "versions": sorted(compiler_versions),
+                     "drivers": drivers},
+        "project": project, "build_configuration_path": build_path,
+        "build_configuration": build_configuration,
+    }
+
+
 def export_run(profile_path: str | Path, run_path: str | Path, output_path: str | Path) -> dict[str, Any]:
     run_root = _safe_existing_directory(run_path, "runner run")
     output = _safe_new_output(output_path)
@@ -802,7 +1237,7 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
     _reject_symlink_components(profile_requested, "product profile")
     profile_file = Path(os.path.abspath(profile_requested))
     profile, profile_raw = _load_json(profile_file, "product profile", MAX_PROFILE_BYTES)
-    _validate_profile(profile)
+    _validate_profile(profile, CPP_LANE_LANGUAGES)
     validated = _validate_run(run_root, profile)
 
     stage = Path(tempfile.mkdtemp(prefix="." + output.name + ".delivery-", dir=output.parent))
@@ -1076,6 +1511,267 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
         raise
 
 
+def export_csharp_run(profile_path: str | Path, run_path: str | Path, output_path: str | Path) -> dict[str, Any]:
+    run_root = _safe_existing_directory(run_path, "runner run")
+    output = _safe_new_output(output_path)
+    try:
+        output.relative_to(run_root)
+        raise HandoffError("output must not be inside the runner run directory")
+    except ValueError:
+        pass
+    profile_requested = Path(profile_path).expanduser()
+    _reject_symlink_components(profile_requested, "product profile")
+    profile_file = Path(os.path.abspath(profile_requested))
+    profile, profile_raw = _load_json(profile_file, "product profile", MAX_PROFILE_BYTES)
+    _validate_profile(profile, CSHARP_LANE_LANGUAGES)
+    validated = _validate_csharp_run(run_root, profile)
+
+    stage = Path(tempfile.mkdtemp(prefix="." + output.name + ".delivery-", dir=output.parent))
+    payload_files: dict[str, dict[str, Any]] = {}
+    provenance: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    profile_path = "provenance/product-profile.json"
+    profile_record = _copy_bytes(stage, profile_path, profile_raw)
+    payload_files[profile_path] = profile_record
+    provenance.append(_provenance(profile_path, profile_record["sha256"], "product-scope-profile"))
+
+    def copy_evidence(source_relative: str, destination: str, purpose: str,
+                      **identity: Any) -> dict[str, Any]:
+        prior = payload_files.get(destination)
+        if prior is not None:
+            return prior
+        source = validated["evidence_files"].get(source_relative)
+        if source is None:
+            raise HandoffError("required evidence file is missing: " + source_relative)
+        copied = _copy_source(stage, source, destination, validated["evidence_hashes"][source_relative])
+        payload_files[destination] = copied
+        provenance.append(_provenance(destination, copied["sha256"], purpose, source_path=source_relative, **identity))
+        return copied
+
+    try:
+        product_id = profile["product_id"]
+        component = profile["component_id"]
+        target_id = profile["target_id"]
+        configuration = profile["configuration"]
+        units = validated["selected"]
+        version_token = validated["version_token"]
+        builds = validated["builds"]
+        # `dotnet --version` reports the SDK and `driver.semanticVersion` reports
+        # the C# compiler; neither is the NetAnalyzers build that emitted the CA
+        # diagnostics. The analyzer identity comes from the restore resolution and
+        # stays null with a recorded limitation when it cannot be read.
+        analyzer_version = validated["analyzers"]["version"]
+        limitations = list(validated["analyzers"]["limitations"])
+        frameworks = [build["target_framework"] for build in builds]
+
+        # Every build target framework keeps its own native SARIF as RAW
+        # evidence, bound to that framework's declared target identity. A merged
+        # document would have to bind to a target that no scanner target carries,
+        # so the per-framework outputs are delivered directly and the merged file
+        # remains available as a supporting convenience copy.
+        for build in builds:
+            framework = build["target_framework"]
+            relative = CSHARP_PER_FRAMEWORK_PREFIX + PurePosixPath(build["sarif"]).name
+            native_record = copy_evidence(
+                relative, "native/csharp-report." + framework + ".sarif", "native-scanner-output")
+            artifacts.append({
+                "path": native_record["path"], "sha256": native_record["sha256"], "tool": CSHARP_TOOL,
+                "format": CSHARP_FORMAT, "tool_version": analyzer_version,
+                "component": component, "configuration": configuration,
+                "target": target_id + "[" + framework + "]",
+                "target_framework": framework,
+            })
+        merged_record = copy_evidence(CSHARP_SARIF_RELATIVE, "provenance/native-merged/csharp-report.sarif",
+                                      "native-merged-supporting-copy")
+
+        root_manifest_path = "provenance/runner/manifest.json"
+        root_record = _copy_bytes(stage, root_manifest_path, validated["run_manifest_raw"])
+        payload_files[root_manifest_path] = root_record
+        provenance.append(_provenance(root_manifest_path, root_record["sha256"], "runner-execution-receipt"))
+        evidence_manifest_path = "provenance/runner/evidence-manifest.json"
+        evidence_record = _copy_bytes(stage, evidence_manifest_path, validated["evidence_manifest_raw"])
+        payload_files[evidence_manifest_path] = evidence_record
+        provenance.append(_provenance(evidence_manifest_path, evidence_record["sha256"], "scanner-evidence-inventory"))
+        copy_evidence("release-gate.json", "provenance/runner/release-gate.json", "scanner-evidence-gate")
+        build_relative = "provenance/build/" + validated["build_configuration_path"].name
+        build_record = _copy_bytes(stage, build_relative, validated["build_configuration"])
+        payload_files[build_relative] = build_record
+        provenance.append(_provenance(build_relative, build_record["sha256"], "build-configuration",
+                                      project=validated["project"]))
+        copy_evidence("01-metadata/source-hashes.json", "provenance/source-hashes.json", "source-hash-inventory")
+        # These typed receipts are copied without interpretation or rewriting.
+        for source_relative in sorted(validated["evidence_files"]):
+            suffix = PurePosixPath(source_relative).suffix.lower()
+            if suffix not in {".json", ".csv", ".txt"}:
+                continue
+            if not source_relative.startswith(("01-metadata/", CSHARP_ARTIFACT_PREFIX)):
+                continue
+            if source_relative in {
+                "01-metadata/source-hashes.json", "01-metadata/dotnet.version.stdout.txt",
+                "01-metadata/dotnet.version.stderr.txt",
+            }:
+                continue
+            copy_evidence(source_relative, "provenance/runner-evidence/" + source_relative, "scanner-typed-receipt")
+
+        for suffix in ("stdout", "stderr"):
+            copy_evidence("01-metadata/dotnet.version." + suffix + ".txt",
+                          "provenance/tool-versions/dotnet.version." + suffix + ".txt",
+                          "tool-version-banner", tool="dotnet")
+        identity_record = _write_json(stage, "provenance/tool-versions/binary-identities.json", {"dotnet": {
+            "sdk_version": version_token,
+            "binary_sha256": validated["version"]["binary_sha256"],
+            "command_basename": Path(validated["version"]["command"][0]).name,
+            "banner_sha256": _sha256_bytes(validated["version_stdout"] + b"\n" + validated["version_stderr"]),
+            "compiler": validated["compiler"],
+            "analyzer": {"name": CSHARP_ANALYZERS, "version": analyzer_version,
+                         "source": validated["analyzers"]["source"], "limitations": limitations},
+        }})
+        payload_files[identity_record["path"]] = identity_record
+        provenance.append(_provenance(identity_record["path"], identity_record["sha256"], "tool-binary-identities"))
+
+        policy_root = validated["run_manifest"].get("policy")
+        policy_tools = policy_root.get("tools") if isinstance(policy_root, dict) else None
+        runner_policy = policy_tools.get(CSHARP_RUNNER_NAME) if isinstance(policy_tools, dict) else None
+        if not isinstance(runner_policy, dict):
+            raise HandoffError("captured scanner policy is missing: " + CSHARP_TOOL)
+        rules = {
+            "schema_version": CSHARP_RULES_SCHEMA,
+            "tool": CSHARP_TOOL,
+            "tool_version": analyzer_version,
+            "tool_version_source": validated["analyzers"]["source"],
+            "sdk_version": version_token,
+            "compiler_semantic_version": validated["compiler"]["semantic_version"],
+            "compiler_versions": validated["compiler"]["versions"],
+            "target_frameworks": frameworks,
+            "binary_sha256": {"dotnet": validated["version"]["binary_sha256"]},
+            "runner_policy": runner_policy,
+            "limitations": limitations,
+        }
+        rules_path = "provenance/rules/" + CSHARP_TOOL + ".json"
+        rules_record = _write_json(stage, rules_path, rules)
+        payload_files[rules_path] = rules_record
+        provenance.append(_provenance(rules_path, rules_record["sha256"], "rules-configuration",
+                                      tool=CSHARP_TOOL, tool_version=analyzer_version, component=component,
+                                      configuration=configuration))
+
+        started = validated["receipt"]["started"]
+        completed = validated["receipt"]["finished"]
+        targets = []
+        for build in builds:
+            framework = build["target_framework"]
+            # Each target framework reports the product units it actually
+            # compiled; units the project does not compile under that framework
+            # are not claimed as analyzed.
+            compiled = validated["compiled"][framework]
+            framework_units = [unit for unit in units if unit in compiled]
+            targets.append({
+                # A multi-target .NET project has one real build target per
+                # framework. Sharing the profile target id across frameworks
+                # would make the three targets indistinguishable downstream, so
+                # the framework is part of the declared target identity.
+                "target": target_id + "[" + framework + "]",
+                "target_framework": framework,
+                "attempted": True,
+                "analyzer_completed": True,
+                "exit_status": build["exit_code"],
+                "outcome": "success",
+                "analysis_units": framework_units,
+                "units_attempted": len(framework_units),
+                "units_completed": len(framework_units),
+                "started_at": build["started"],
+                "completed_at": build["finished"],
+            })
+        tool_runs = [{
+            "tool": CSHARP_TOOL,
+            "tool_version": analyzer_version,
+            "component": component,
+            "configuration": configuration,
+            "command": "one dotnet build per target framework with Microsoft.CodeAnalysis.NetAnalyzers "
+                       "enabled and a per-framework SARIF ErrorLog; the exact arguments and runner policy "
+                       "are preserved in the execution receipts",
+            "rules_config_sha256": rules_record["sha256"],
+            "started_at": started,
+            "completed_at": completed,
+            "targets": targets,
+        }]
+
+        source = {
+            "repository": profile["repository"],
+            "commit": validated["commit"],
+            "build_configuration_sha256": build_record["sha256"],
+            "scope": {
+                "included_components": [component],
+                "included_paths": list(profile["included_paths"]),
+                "excluded_paths": list(profile["excluded_paths"]),
+                "languages": list(profile["languages"]),
+                "unsupported_languages": list(profile["unsupported_languages"]),
+            },
+        }
+        component_record = {
+            "component_id": component,
+            "target_id": target_id,
+            "configuration": configuration,
+            "analysis_units": units,
+            "relative_source_paths": validated["relative_units"],
+        }
+        # The delivery schema keeps every analyzer counter inside the single
+        # `scanner_reported_diagnostics` object, so the C# lane names its own
+        # NetAnalyzers counter there instead of adding a flat top-level key. The
+        # per-framework counters beside it keep the multi-target breakdown explicit.
+        counts = {
+            "selected_analysis_units": len(units),
+            "artifact_count_by_tool": {CSHARP_TOOL: len(artifacts)},
+            "scanner_reported_diagnostics": {
+                "dotnet_netanalyzers_native_sarif": validated["sarif"]["diagnostics"],
+            },
+            "target_frameworks": frameworks,
+            "units_by_target_framework": {target["target_framework"]:
+                                          len(target["analysis_units"]) for target in targets},
+            "compiled_units_by_target_framework": {
+                build["target_framework"]: build["units_completed"] for build in builds},
+            "diagnostics_by_target_framework": {build["target_framework"]: build["diagnostics"]
+                                                for build in builds},
+        }
+        manifest = {
+            "schema_version": DELIVERY_SCHEMA,
+            "run_id": validated["run_id"],
+            "project": {"product_id": product_id, "display_name": profile["display_name"]},
+            "source": source,
+            "components": [component_record],
+            "tool_runs": tool_runs,
+            "artifacts": artifacts,
+            "provenance_inputs": provenance,
+            "counts": counts,
+            "delivery_status": "complete-scan-evidence; no release approval implied",
+        }
+        manifest_record = _write_json(stage, "manifest.json", manifest)
+        payload_files[manifest_record["path"]] = manifest_record
+        receipt = {
+            "schema_version": RECEIPT_SCHEMA,
+            "run_id": validated["run_id"],
+            "product_id": product_id,
+            "manifest": manifest_record,
+            "files": [payload_files[path] for path in sorted(payload_files)],
+        }
+        receipt_record = _write_json(stage, "delivery-receipt.json", receipt)
+        _rename_noreplace(stage, output)
+        return {
+            "status": "delivered",
+            "schema_version": RECEIPT_SCHEMA,
+            "run_id": validated["run_id"],
+            "product_id": product_id,
+            "output": str(output),
+            "manifest_sha256": manifest_record["sha256"],
+            "file_count": len(payload_files),
+            "receipt_sha256": receipt_record["sha256"],
+            "counts": counts,
+        }
+    except BaseException:
+        if stage.exists() and stage.is_dir() and not stage.is_symlink():
+            shutil.rmtree(stage)
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Export completed scanner evidence as a portable product delivery")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -1083,9 +1779,16 @@ def main(argv: list[str] | None = None) -> int:
     export.add_argument("--profile", required=True, type=Path, help="operator-approved product scope profile")
     export.add_argument("--run", required=True, type=Path, help="top-level runner result directory")
     export.add_argument("--output", required=True, type=Path, help="new delivery directory")
+    export_csharp = subparsers.add_parser("export-csharp", help="export one C#-only product scan")
+    export_csharp.add_argument("--profile", required=True, type=Path, help="operator-approved C# product scope profile")
+    export_csharp.add_argument("--run", required=True, type=Path, help="top-level runner result directory")
+    export_csharp.add_argument("--output", required=True, type=Path, help="new delivery directory")
     args = parser.parse_args(argv)
     try:
-        receipt = export_run(args.profile, args.run, args.output)
+        if args.action == "export-csharp":
+            receipt = export_csharp_run(args.profile, args.run, args.output)
+        else:
+            receipt = export_run(args.profile, args.run, args.output)
         print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
         return 0
     except (HandoffError, OSError, ValueError, KeyError, TypeError) as error:

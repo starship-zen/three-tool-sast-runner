@@ -8,7 +8,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scan"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
+import msbuild_fixture
 from csharp_roslyn import reporting, scanner
 
 
@@ -58,22 +60,19 @@ class ExampleTests(unittest.TestCase):
             database, _, entries = common.plan(paths, source_fallback=True, suffixes=common.CSHARP_SUFFIXES)[0]
             self.assertIsNone(database)
             self.assertEqual([entry["file"] for entry in entries], [str(source.resolve())])
-            tool = folder / "fake-dotnet"
-            tool.write_text("#!" + sys.executable + "\n" + '''import json, sys
-from pathlib import Path
-error_log = next(item.split("=", 1)[1] for item in sys.argv if item.startswith("-p:ErrorLog="))
-path, version = error_log.rsplit(",", 1)
-assert version == "version=2.1", version
-sarif = {"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Microsoft.CodeAnalysis.NetAnalyzers"}},
-         "results": [{"ruleId": "CA2100", "level": "warning", "message": {"text": "Review SQL query"},
-                      "locations": [{"physicalLocation": {"artifactLocation": {"uri": "Guard.cs"},
-                                                           "region": {"startLine": 1, "startColumn": 1}}}]}]}]}
-Path(path).write_text(json.dumps(sarif))
-''')
-            tool.chmod(0o755)
+            tool = msbuild_fixture.write_fake_dotnet(
+                folder, source.parent / "GuardClauses.csproj",
+                {"net8.0": [str(path.resolve()) for path in sorted(source.parent.rglob("*.cs"))
+                             if not {"bin", "obj"}.intersection(path.relative_to(source.parent).parts)]},
+                {"net8.0": [{"ruleId": "CA2100", "level": "warning", "message": {"text": "Review SQL query"},
+                             "locations": [{"physicalLocation": {"artifactLocation": {"uri": "Guard.cs"},
+                                                                  "region": {"startLine": 1, "startColumn": 1}}}]}]},
+                # The vendored example must not be mutated: this fixture must not
+                # write restore assets into the repository checkout.
+                write_assets=False)
             result_folder = output / "csharp_roslyn"
             receipt = scanner.scan(entries, paths, None, result_folder, {"dotnet": str(tool)})
-            self.assertTrue(receipt["ok"], receipt.get("artifact_error"))
+            self.assertTrue(receipt["ok"], receipt.get("error"))
             self.assertEqual(receipt["project"], str((source.parent / "GuardClauses.csproj").resolve()))
             diagnostics = reporting.parse_sarif(result_folder / reporting.SARIF_NAME)
             self.assertEqual([item["rule_id"] for item in diagnostics], ["CA2100"])

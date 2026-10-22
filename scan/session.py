@@ -43,7 +43,9 @@ def render_reports(scanners, group, folder, entries, scopes, binaries):
 def run(paths, result_path, scanners):
     common.CANCELLED.clear()
     ignore_db = all(not getattr(s, "REQUIRES_DATABASE", True) for s in scanners)
-    groups = common.plan(paths, source_fallback=True, suffixes=common.scanner_suffixes(scanners), ignore_database=ignore_db)
+    groups = common.plan(paths, source_fallback=True, suffixes=common.scanner_suffixes(scanners),
+                          ignore_database=ignore_db,
+                          ignored_parts=common.scanner_ignored_parts(scanners))
     binaries = {}
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
     run_path = result_path / run_id
