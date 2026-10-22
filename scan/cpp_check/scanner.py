@@ -8,6 +8,7 @@ from .cache import build_cache
 NAME = "cpp_check"
 JOBS = 4
 SUPPORTS_SOURCE = True
+INPUT_SUFFIXES = common.CPP_SOURCE_SUFFIXES
 REQUIRED_TOOLS = ("cppcheck",)
 REPORT_PRIORITY = 1
 FLAGS = ["--xml", "--xml-version=2", "--enable=all", "--inconclusive"]

@@ -9,6 +9,7 @@ from . import reporting
 NAME = "clang_static_analyzer"
 JOBS = 4
 SUPPORTS_SOURCE = False
+INPUT_SUFFIXES = common.CPP_SOURCE_SUFFIXES
 REQUIRED_TOOLS = ("clang", "clang++")
 REPORT_PRIORITY = 0
 RELAX = ["-Wno-return-type-c-linkage", "-Wno-non-pod-varargs", "-Wno-invalid-constexpr"]

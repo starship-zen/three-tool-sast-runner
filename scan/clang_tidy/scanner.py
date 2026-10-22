@@ -8,6 +8,7 @@ from . import reporting
 NAME = "clang_tidy"
 JOBS = 4
 SUPPORTS_SOURCE = False
+INPUT_SUFFIXES = common.CPP_SOURCE_SUFFIXES
 REQUIRED_TOOLS = ("clang-tidy",)
 REPORT_PRIORITY = 2
 TIDY_CHECKS = ",".join((

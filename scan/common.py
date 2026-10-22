@@ -17,7 +17,9 @@ from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "scan" / "analy.config"
-SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".m", ".mm"}
+CPP_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".m", ".mm"}
+CSHARP_SUFFIXES = {".cs"}
+SOURCE_SUFFIXES = CPP_SOURCE_SUFFIXES | CSHARP_SUFFIXES
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
 PROCESS_TIMEOUT = 900
 ACTIVE_PROCESSES = set()
@@ -78,18 +80,19 @@ def inputs(argv, config_path=CONFIG):
         if not path.exists() or not (path.is_dir() or path.is_file()):
             raise ValueError("扫描路径不存在或不是普通文件/目录: " + str(path))
         if path.is_file() and path.suffix.lower() not in SOURCE_SUFFIXES | HEADER_SUFFIXES:
-            raise ValueError("只支持 C/C++ 源文件、头文件或目录: " + str(path))
+            raise ValueError("只支持 C/C++/C# 源文件、头文件或目录: " + str(path))
     return paths, (result_base / raw_result).resolve()
 
 
 def in_scope(path, scopes):
     path = path.resolve()
+    resolved_scopes = [s.resolve() for s in scopes]
     return any(
         path == scope or (
             scope.is_dir() and scope in path.parents
             and scope / "thirdparty" not in path.parents
         )
-        for scope in scopes
+        for scope in resolved_scopes
     )
 
 
@@ -103,10 +106,19 @@ def find_database(scope):
     raise ValueError("未找到编译数据库（从扫描路径逐级向上查找）: " + str(scope))
 
 
-def plan(paths, source_fallback=False):
+def scanner_suffixes(scanners):
+    suffixes = set()
+    for scanner in scanners:
+        suffixes.update(getattr(scanner, "INPUT_SUFFIXES", SOURCE_SUFFIXES))
+    return suffixes
+
+
+def plan(paths, source_fallback=False, suffixes=SOURCE_SUFFIXES, ignore_database=False):
     databases = {}
     for path in paths:
         try:
+            if ignore_database:
+                raise ValueError("ignore database")
             database = find_database(path)
         except ValueError:
             if not source_fallback:
@@ -120,7 +132,7 @@ def plan(paths, source_fallback=False):
             for scope in scopes:
                 candidates = [scope] if scope.is_file() else scope.rglob("*")
                 sources.update(path.resolve() for path in candidates
-                               if path.is_file() and path.suffix.lower() in SOURCE_SUFFIXES
+                               if path.is_file() and path.suffix.lower() in suffixes
                                and in_scope(path, scopes))
             if not sources:
                 raise ValueError("源码扫描范围未匹配任何源文件")
@@ -138,7 +150,7 @@ def plan(paths, source_fallback=False):
             directory = Path(entry.get("directory") or database.parent)
             directory = (database.parent / directory).resolve()
             source = (directory / entry["file"]).resolve()
-            if source.suffix.lower() not in SOURCE_SUFFIXES or not in_scope(source, scopes):
+            if source.suffix.lower() not in suffixes or not in_scope(source, scopes):
                 continue
             if not source.is_file():
                 raise ValueError("编译数据库中的源文件不存在: " + str(source))

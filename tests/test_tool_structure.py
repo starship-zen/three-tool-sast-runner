@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scan"))
 import common
 import session
-from registry import SCANNERS
+from registry import ALL_SCANNERS, SCANNERS
 
 
 class ToolStructureTests(unittest.TestCase):
@@ -29,14 +29,14 @@ class ToolStructureTests(unittest.TestCase):
                                  for node in ast.walk(tree)), name)
 
     def test_each_tool_owns_its_scan_report_and_policy(self):
-        for scanner in SCANNERS:
+        for scanner in ALL_SCANNERS:
             directory = ROOT / "scan" / scanner.NAME
             self.assertEqual(Path(scanner.__file__).parent, directory)
             self.assertEqual(Path(scanner.reporting.__file__).parent, directory)
             self.assertEqual(scanner.scan.__module__, scanner.__name__)
             self.assertEqual(scanner.report.__module__, scanner.__name__)
             self.assertEqual(scanner.POLICY["jobs"], 4)
-            self.assertEqual(scanner.SUPPORTS_SOURCE, scanner.NAME == "cpp_check")
+            self.assertEqual(scanner.SUPPORTS_SOURCE, scanner.NAME in ("cpp_check", "csharp_roslyn"))
 
     def test_single_tool_does_not_import_main_or_other_analyzers(self):
         for scanner in SCANNERS:

@@ -75,6 +75,7 @@ class ContractChecks(unittest.TestCase):
                     "03-cppcheck/result/cppcheck-compile-report.xml": "RAW",
                     "04-clang-tidy/result/fixes/unit.yaml": "RAW",
                     "05-clang-static-analyzer/result/csa-native/unit.plist": "RAW",
+                    "06-csharp-roslyn/result/csharp-report.sarif": "RAW",
                     "03-cppcheck/cppcheck-build/unit.xml": "CACHE",
                     "01-metadata/analy.config.original": "RECEIPT",
                     "01-metadata/unrelated.yaml": "RECEIPT",

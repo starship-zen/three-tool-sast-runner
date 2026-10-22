@@ -14,7 +14,8 @@ def artifact_layer(relative):
         return "CACHE"
     if (parts[0] == "03-cppcheck" and name == "cppcheck-compile-report.xml"
             or parts[0] == "04-clang-tidy" and "fixes" in parts and name.endswith(".yaml")
-            or parts[0] == "05-clang-static-analyzer" and name.endswith(".plist")):
+            or parts[0] == "05-clang-static-analyzer" and name.endswith(".plist")
+            or parts[0] == "06-csharp-roslyn" and name.endswith(".sarif")):
         return "RAW"
     if (Path(name).suffix in (".html", ".css", ".md") or name == "summary.json"
             or name in ("severity.csv", "release-gate.json")):
