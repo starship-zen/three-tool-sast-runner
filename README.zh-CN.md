@@ -9,6 +9,9 @@
 > `release_ready=false`。下游契约导出和业务产品隔离继续暂缓，详见
 > [剩余验收工作](scan/IMPLEMENTATION_STATUS.md)。
 
+[示例库与验证命令](examples/README.md)：固定版本的 TinyXML2（C++，构建及扫描）和
+GuardClauses（C#，仅构建/运行；尚未实现 C# 扫描）。
+
 ---
 
 ## 1. 项目概述

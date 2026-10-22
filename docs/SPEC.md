@@ -310,3 +310,12 @@ Wrong: keep the first macro configuration, delete all contents of a caller's
 build directory, insert a raw filename into HTML, or source the old Shell config.
 Correct: reject conflicting contexts, preserve caller-owned artifacts, escape
 display values, and parse the documented JSON configuration.
+
+### 8.8 Pinned Library Examples
+
+`examples/README.md` documents a vendored TinyXML2 C++ build/scan fixture and a
+GuardClauses C# build/run fixture. Each subset retains its license and a pinned
+upstream commit with per-file SHA-256 checks in `tests/test_examples.py`. The C#
+fixture does not add C# analyzer support: direct `.cs` input must still fail before
+creating a run. Successful builds do not establish security coverage or release
+acceptance, and neither example is a vulnerability-detection benchmark.

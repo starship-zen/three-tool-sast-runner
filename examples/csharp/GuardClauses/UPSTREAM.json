@@ -1,0 +1,31 @@
+{
+  "repository": "https://github.com/ardalis/GuardClauses.git",
+  "tag": "v5.0",
+  "commit": "ad43aa02babf3bc8aee8efc2258f5ad3571c8ec5",
+  "retrieved_on": "2026-10-22",
+  "retrieval_method": "git clone --depth 1 --branch v5.0",
+  "license": "MIT",
+  "selection_note": "Unmodified GuardClauses source and upstream metadata are included as a small C# example dependency; this does not add C# scanning support to the runner.",
+  "files": {
+    "Directory.Build.props": "6211ccdb383501278be6d9e16c5df840ed923e757ed3bd533e44693f70fc8dfe",
+    "LICENSE": "8e0a1dd30992f00b9759f9367da0925664770bd32e00fa76b52e17529af8c12e",
+    "README.md": "18e306940948571c2c15076af1ed01c5cfdd1264506b37a1694eadfd095b0ed6",
+    "src/GuardClauses/CompilerFixes/CallerArgumentExpressionAttribute.cs": "9c42f13e62b4396c3d3a2aef113006c0362091afe76ea9e1bc661375e00c2615",
+    "src/GuardClauses/Exceptions/NotFoundException.cs": "e68e3a62da6b81bf0b7a99b3d72cfccfe3caefcc4d467975dd70f01b0907ec3b",
+    "src/GuardClauses/Guard.cs": "f6fd04b201d1f55ca056df4a2939dcfb183a064144901b42942a5765e0760596",
+    "src/GuardClauses/GuardAgainstEmptyOrWhiteSpaceExtensions.cs": "02571fea8c559c8aadae995eedd637fe0a585c3898729bf14f7ecb9ffcbd654e",
+    "src/GuardClauses/GuardAgainstExpressionExtensions.cs": "a04514c0101a52efcadbcca98bca92301659f4aa0e902cd511dbcbbbb0281bfb",
+    "src/GuardClauses/GuardAgainstExpressionExtensionsDeprecated.cs": "dcd6b563a1c602b30d94ea3b7c967e3970bd5213395e185d40f89f70075abd4a",
+    "src/GuardClauses/GuardAgainstInvalidFormatExtensions.cs": "d6ed4a87ca1d356b8fba6df8c458d31e2a37c51505c69d10928019d58654b8b6",
+    "src/GuardClauses/GuardAgainstNegativeExtensions.cs": "127128ba62c210b96319858f255d32519606ce75012302d7ec84532aff544ddc",
+    "src/GuardClauses/GuardAgainstNotFoundExtensions.cs": "23639b8ff2488d340ab8de96ccc61f226cf227be21fe59523419c70d537e0856",
+    "src/GuardClauses/GuardAgainstNullExtensions.cs": "6b36cb33c652be6afc23a303606fd0d6aefe23b9d2666a7328f9e432e70fe875",
+    "src/GuardClauses/GuardAgainstOutOfRangeExtensions.cs": "c63150fa793a330d8070221e9d2361a66d7c3c3dc807a0ecd48e7cecbe48af1b",
+    "src/GuardClauses/GuardAgainstStringLengthExtensions.cs": "053e5d96882cc143b769dd00a9be4a47c5703461e5ccb7b6919afac336ec8f9f",
+    "src/GuardClauses/GuardAgainstZeroExtensions.cs": "82942bb0024065f3c0332e48074a846cee5f47fbf0be87d5095165a2758208ee",
+    "src/GuardClauses/GuardClauses.csproj": "a07ebcc3b8a9066ad4181ec344aec1b920bed5a510407397e4fcd3ee7e4ab62d",
+    "src/GuardClauses/ThirdParty/JetBrains.Annotations.cs": "064c03ffa9ae789c720513866bb4523999445bf39585ddba539057f256c97c7a",
+    "src/GuardClauses/ValidatedNotNullAttribute.cs": "b28e475206e73e21fec7e083c7740b37b546e7ba9b7a703cb0a96b3516d7483a",
+    "src/GuardClauses/icon.png": "9e394567c0cd02ee5c66c05f216b12a85cf00e9daf531bbc5fb7d5b0b4406856"
+  }
+}

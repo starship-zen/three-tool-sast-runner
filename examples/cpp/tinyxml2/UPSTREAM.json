@@ -1,0 +1,33 @@
+{
+  "repository": "https://github.com/leethomason/tinyxml2.git",
+  "tag": "11.0.0",
+  "commit": "9148bdf719e997d1f474be6bcc7943881046dba1",
+  "retrieved_on": "2026-10-22",
+  "retrieval_method": "git clone --depth 1 --branch 11.0.0",
+  "license": "Zlib",
+  "selection_note": "Pins this example to the requested upstream tag; this is not a claim that the tag is the latest release.",
+  "files": {
+    "CMakeLists.txt": "d93bf5b349fc93a9108e243675d3aabc2af38c24382fad4365db108bb3600a75",
+    "LICENSE.txt": "9332252e9b9e46db8285d4a3f0bf25f139bf1dca6781b956d57f2302efca6432",
+    "cmake/tinyxml2-config.cmake": "3bce32cb8ba9927c5c2376d53addfebb3458821300ac93bfe1a32c131ed6d0db",
+    "cmake/tinyxml2.pc.in": "286d2f67789aa531a1cadad99b3863098a1563d19856698bed6bf42f297e3c07",
+    "tinyxml2.cpp": "95f64e4cb06c9e147d5b12e8860c88898944858dfbc38fed92ebf918f1436554",
+    "tinyxml2.h": "0f3c6e5a91b6d65caca3cc7239926455f21e488cff80ac3d27c74f5262fd2602"
+  },
+  "omitted_upstream_paths": [
+    ".github/",
+    ".gitignore",
+    "Makefile",
+    "TinyXML2_small.png",
+    "contrib/",
+    "docs/",
+    "dox/",
+    "meson.build",
+    "meson_options.txt",
+    "readme.md",
+    "resources/",
+    "setversion.py",
+    "test/",
+    "xmltest.cpp"
+  ]
+}

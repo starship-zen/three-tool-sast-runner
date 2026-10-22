@@ -9,6 +9,9 @@ Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, an
 > `release_ready=false`. The `three-tool-input-1.0` exporter and business-product
 > isolation remain deferred. See [remaining acceptance work](scan/IMPLEMENTATION_STATUS.md).
 
+[Example libraries](examples/README.md): pinned TinyXML2 (C++, build and scan) and
+GuardClauses (C#, build/run only; C# scanning is not implemented).
+
 ---
 
 ## 1. Overview
