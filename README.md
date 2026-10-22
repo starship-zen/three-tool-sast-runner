@@ -2,7 +2,7 @@
 
 [ English ](README.md) • [ 简体中文 ](README.zh-CN.md)
 
-Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, and **Clang Static Analyzer (CSA)** to produce standardized, auditable evidence packages for industrial control software and IEC 62443 compliance.
+Automated static analysis runner for two delivery lanes: **Cppcheck**, **Clang-Tidy** and **Clang Static Analyzer (CSA)** for C/C++, and **Roslyn** with **Microsoft.CodeAnalysis.NetAnalyzers** for C#. Both lanes produce standardized, auditable evidence packages for industrial control software and IEC 62443 compliance.
 
 > **Current status:** The runner emits `scanner-evidence-1` with
 > `downstream_compatible=false` and `release_ready=false`, and can export a
@@ -10,9 +10,14 @@ Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, an
 > owns the adapter that binds its local mappings/assets and creates canonical
 > `three-tool-input-1.0`; neither delivery nor report candidate grants release
 > approval. See [remaining acceptance work](scan/IMPLEMENTATION_STATUS.md).
+>
+> The C# lane scans one `.sln`/`.csproj` per run through
+> `scan/csharp_roslyn/scan.sh` and exports with `scan/handoff.py export-csharp`.
+> Its per-target-framework identities, counters and version semantics are
+> documented in the [deployment guide](docs/DEPLOYMENT.md).
 
 [Example libraries](examples/README.md): pinned TinyXML2 (C++, build and scan) and
-GuardClauses (C#, build/run only; C# scanning is not implemented).
+GuardClauses (C#, build/run; C# scanning runs through the separate C# lane).
 
 ---
 
@@ -23,8 +28,9 @@ GuardClauses (C#, build/run only; C# scanning is not implemented).
 2. Run **Cppcheck (2.22+)**, **Clang-Tidy (LLVM 14+)**, and **Clang Static Analyzer (LLVM 14+)** on the exact same commit and compile database.
 3. Format outputs into a strictly layered, immutable evidence bundle (`[RAW]` diagnostics, `[RECEIPT]` execution receipts, `[CACHE]` states, and `[DERIVED]` summaries).
 4. Export a portable, product-scoped `three-tool-scan-delivery-1.0` containing unchanged native outputs and hash-bound scan/build/version receipts. The separate report consumer binds its own approved standards and mappings when preparing canonical input; the runner does not ship reporting policy.
+5. Scan a C# project with Roslyn and NetAnalyzers — one isolated build and one native SARIF per declared target framework — and export it as its own C#-only delivery.
 
-For the full architectural specification and interface contract, see [docs/SPEC.md](docs/SPEC.md) (English) or [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md) (中文).
+For the full architectural specification and interface contract, see [docs/SPEC.md](docs/SPEC.md) (English) or [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md) (中文). Installation, per-lane commands and troubleshooting are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (English) or [docs/DEPLOYMENT.zh-CN.md](docs/DEPLOYMENT.zh-CN.md) (中文).
 
 ---
 
@@ -33,7 +39,9 @@ For the full architectural specification and interface contract, see [docs/SPEC.
 ```text
 three-tool-sast-runner/
 ├── README.md / README.zh-CN.md
-├── docs/SPEC.md / SPEC.zh-CN.md
+├── docs/
+│   ├── SPEC.md / SPEC.zh-CN.md
+│   └── DEPLOYMENT.md / DEPLOYMENT.zh-CN.md
 ├── analy.config.example    # JSON template; copy to scan/analy.config
 ├── requirements.txt        # Python dependency for native YAML validation
 ├── install/
@@ -47,7 +55,8 @@ three-tool-sast-runner/
 │   ├── IMPLEMENTATION_STATUS.md
 │   ├── cpp_check/scan.sh
 │   ├── clang_tidy/scan.sh
-│   └── clang_static_analyzer/scan.sh
+│   ├── clang_static_analyzer/scan.sh
+│   └── csharp_roslyn/scan.sh   # C# lane: Roslyn + NetAnalyzers
 └── tests/
 ```
 
@@ -57,7 +66,7 @@ three-tool-sast-runner/
 
 | Layer Marker | Description | Producer | Role in Downstream Report Generator |
 | :--- | :--- | :--- | :--- |
-| **`[RAW]`** | XML v2, YAML fixes, Plist | Analyzer binary directly | Consumed directly as ground truth evidence |
+| **`[RAW]`** | Cppcheck XML v2, clang-tidy YAML fixes, CSA Plist, C# NetAnalyzers SARIF | Analyzer binary directly | Consumed directly as ground truth evidence |
 | **`[RECEIPT]`** | CLI args, exit codes, TU mappings, execution status JSON | Runner orchestrator | Proves clean execution, scope, and coverage |
 | **`[CACHE]`** | AST caches (`cppcheck-build/`) | Analyzer binary | Performance optimization; not evaluated as reports |
 | **`[DERIVED]`** | HTML reports, Markdown summaries, severity distribution summaries | Helper scripts | Human developer quick-view only |
@@ -108,6 +117,13 @@ uv run --frozen python scan/handoff.py export \
   --profile /path/to/product-profile.json \
   --run /path/to/results/RUN_ID \
   --output /path/to/new-product-delivery
+# C# lane: no compilation database, one .sln/.csproj per run:
+uv run --frozen bash scan/csharp_roslyn/scan.sh \
+  --scan-path /path/to/product/src --result-path /path/to/csharp-results
+uv run --frozen python scan/handoff.py export-csharp \
+  --profile /path/to/csharp-product-profile.json \
+  --run /path/to/csharp-results/RUN_ID \
+  --output /path/to/new-csharp-delivery
 ```
 
 For each scan path, the runner searches its ancestors for `compile_commands.json`,
@@ -132,6 +148,14 @@ component/target/configuration; every selected TU must fit the profile's
 repository-relative path and C/C++ language scope. It rejects failed evidence
 gates and multiple groups, and never infers business ownership from compile
 database labels.
+
+`scan/handoff.py export-csharp` is the C# counterpart. It accepts only a
+C#-only run (`tools: ["csharp_roslyn"]`, source scope without a compilation
+database) and a profile whose `languages` are `["C#"]`, binds the
+`Microsoft.CodeAnalysis.NetAnalyzers` release as `tool_version`, and declares
+one target identity per built framework as `<target_id>[<tfm>]`. The exact
+profile, counters, version rules and known limitations are in the
+[deployment guide](docs/DEPLOYMENT.md).
 
 `scan/handoff.py export` writes a new, portable delivery with a hash-bound file
 inventory, unchanged native scanner bytes, source/build identity, typed

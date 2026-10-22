@@ -1,7 +1,10 @@
 # Remaining Acceptance Work
 
 Status as of October 22, 2026. Implementation tests and real analyzer executions
-are not substitutes for downstream or business-owner acceptance.
+are not substitutes for downstream or business-owner acceptance. The two
+implemented delivery lanes are C/C++ (section 2) and C# (section 6); their
+operator commands, prerequisites and troubleshooting live in
+[DEPLOYMENT.md](../docs/DEPLOYMENT.md).
 
 ## 1. Tool Upgrade: Deferred By Owner
 
@@ -52,12 +55,15 @@ is unchanged. Valid zero-diagnostic plist may have no HTML; findings require
 nonempty regular HTML reports. Failed exit, invalid/non-plist output or missing
 positive HTML remains an attributable failed TU, not a successful scan.
 
-The locked Python suite passes 157 tests, including eight single-pass
-regressions and exporter root/scope regressions. Native LLVM 18.1.3 probes
-cover zero, positive and cross-file findings. The two-TU public sample completed
-in 84.344 seconds, with one CSA invocation per TU. Earlier duplicate-pass runs
-were capped partials, so no percentage speedup is claimed. The reporter's
-locked 235-test run includes the actual exported sample without an opt-in skip.
+The Python suite currently holds 202 tests, including eight single-pass
+regressions, C# scanner and C# exporter regressions, and exporter root/scope
+regressions. Run it in the locked environment with
+`PYTHONDONTWRITEBYTECODE=1 uv run --frozen python -m unittest discover -s tests`.
+Native LLVM 18.1.3 probes cover zero, positive and cross-file findings. The
+two-TU public sample completed in 84.344 seconds, with one CSA invocation per
+TU. Earlier duplicate-pass runs were capped partials, so no percentage speedup
+is claimed. The reporter's locked 235-test run includes the actual exported
+sample without an opt-in skip.
 
 ## 3. Business Product Boundary: Explicit Owner Scope Required
 
@@ -107,3 +113,48 @@ inputs plus pinned toolchain/build resources and validation on a clean host.
 
 `release_ready` remains false. The release gate lists these pending dependencies
 explicitly; a passing unit suite, a cache hit or exit code 0 is not certification.
+
+## 6. C# Product Lane: Implemented, Not Yet Accepted
+
+The C# delivery lane exists and is exercised by tests, but it has no qualified
+business-product acceptance run.
+
+Implemented: `scan/csharp_roslyn/scan.sh` runs one `.sln`/`.csproj` per execution
+with `Microsoft.CodeAnalysis.NetAnalyzers`; it builds every declared target
+framework separately (`-p:TargetFramework=<tfm>`, one native SARIF each), takes
+its compilation-unit inventory from MSBuild `Compile` items rather than from a
+directory listing, fails closed when a selected `.cs` file is not compiled by any
+framework, and writes a typed receipt plus `csharp-reconciliation.csv`.
+`scan/handoff.py export-csharp` exports one C#-only run as
+`three-tool-scan-delivery-1.0`, binding `tool_version` to the analyzer package
+release, declaring each target as `<target_id>[<tfm>]`, and keeping the SDK
+banner and the compiler driver as separate provenance. Multi-target-framework
+deliveries are accepted by the receiving repository (`prepare-runner`).
+
+Open items:
+
+1. Single-framework C# deliveries are rejected by the receiver's count-shape
+   check (exit `2`, `error.code: invalid_runner_delivery`, message `delivery
+   counts does not match the delivery contract`). The producer always writes the
+   multi-framework counters; the
+   receiver accepts them only when more than one framework is declared. This
+   needs a code change in one of the two repositories, not a documentation or
+   profile workaround.
+2. A delivery that mixes the two tool families has no receiving path. C/C++
+   evidence must be exported with `export` and C# evidence with `export-csharp`,
+   as two deliveries registered as two reporter products; the receiver rejects a
+   mixed tool set.
+3. The C# mapping library
+   (`assets/three-tool-rule-mappings-csharp-v1-2025.json` in the reporter)
+   contains a single curated rule and a provisional `tool_version` label. A real
+   delivery reports the actual analyzer release (for example `8.0.0`), so strict
+   audit and strict generation block on `unknown-tool-version` gaps until the
+   observed rules are reviewed and the library is bound to the real release.
+4. The C# run's `release-gate.json` keeps `ok: false` because the C/C++-family
+   certification reasons remain in the file. Only `checks.csharp_roslyn.errors`
+   is meaningful for this lane; operators must not read `ok` as the lane verdict
+   or delete the C/C++ checks to make it green.
+5. No qualified machine has yet been accepted for a C# business product, and no
+   real C# product scan, consumer preparation and candidate report is recorded
+   here. Unit, exporter-fixture and synthetic receiving tests do not certify a
+   scanner installation, a product boundary or release readiness.

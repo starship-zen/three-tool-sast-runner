@@ -2,16 +2,20 @@
 
 [ English ](README.md) • [ 简体中文 ](README.zh-CN.md)
 
-三工具自动化 C/C++ 静态代码分析执行器（Runner）：一键自动化调度 **Cppcheck**、**Clang-Tidy** 与 **Clang Static Analyzer (CSA)**，生成符合工业控制软件安全与 IEC 62443 标准要求的可审计结构化证据包。
+两条通道的自动化静态代码分析执行器（Runner）：C/C++ 由 **Cppcheck**、**Clang-Tidy** 与 **Clang Static Analyzer (CSA)** 承担；C# 由 **Roslyn** 配合 **Microsoft.CodeAnalysis.NetAnalyzers** 承担。两条通道都生成符合工业控制软件安全与 IEC 62443 标准要求的可审计结构化证据包。
 
 > **当前状态：** 已有扫描执行器实现，端到端验收尚未完成。
 > 当前输出 `scanner-evidence-1`，明确标记 `downstream_compatible=false` 和
 > `release_ready=false`；另可导出产品范围的 `three-tool-scan-delivery-1.0`。
 > 报告消费者负责绑定其本地映射资产并生成标准 `three-tool-input-1.0`；交付包不等于报告或发布批准。详见
 > [剩余验收工作](scan/IMPLEMENTATION_STATUS.md)。
+>
+> C# 通道每次运行扫描一个 `.sln`/`.csproj`，入口为 `scan/csharp_roslyn/scan.sh`，
+> 导出用 `scan/handoff.py export-csharp`。逐目标框架的目标身份、计数与版本语义见
+> [部署指南](docs/DEPLOYMENT.zh-CN.md)。
 
 [示例库与验证命令](examples/README.md)：固定版本的 TinyXML2（C++，构建及扫描）和
-GuardClauses（C#，仅构建/运行；尚未实现 C# 扫描）。
+GuardClauses（C#，构建/运行；C# 扫描走独立的 C# 通道）。
 
 ---
 
@@ -21,9 +25,10 @@ GuardClauses（C#，仅构建/运行；尚未实现 C# 扫描）。
 1. 从 CMake 导出的 `compile_commands.json` 自动解析出被测的编译单元（TU）；
 2. 在**完全相同的 Git 提交与相同的编译数据库**基线上，无缝并行调度 **Cppcheck (2.22+)**、**Clang-Tidy (LLVM 14+)**、**Clang Static Analyzer (LLVM 14+)**；
 3. 将产物整理为具有严格分层标识的自包含证据包（`[RAW]` 原生诊断、`[RECEIPT]` 运行收据、`[CACHE]` 内部缓存、`[DERIVED]` 衍生摘要）；
-4. 导出可移交的产品范围 `three-tool-scan-delivery-1.0`，包含未修改的原生结果及哈希绑定的扫描/构建/版本收据。独立报告消费者负责绑定本地标准和映射，再准备规范报告输入。
+4. 导出可移交的产品范围 `three-tool-scan-delivery-1.0`，包含未修改的原生结果及哈希绑定的扫描/构建/版本收据。独立报告消费者负责绑定本地标准和映射，再准备规范报告输入；执行器不携带报告策略。
+5. 以 Roslyn + NetAnalyzers 扫描 C# 项目：每个声明的目标框架一次独立构建、一份原生 SARIF，并导出为独立的纯 C# 交付。
 
-完整技术规约与引擎实测行为请参考 [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md)（中文）或 [docs/SPEC.md](docs/SPEC.md)（英文）。
+完整技术规约与引擎实测行为请参考 [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md)（中文）或 [docs/SPEC.md](docs/SPEC.md)（英文）。安装、两条通道的命令序列与排错见 [docs/DEPLOYMENT.zh-CN.md](docs/DEPLOYMENT.zh-CN.md)（中文）或 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)（英文）。
 
 ---
 
@@ -32,7 +37,9 @@ GuardClauses（C#，仅构建/运行；尚未实现 C# 扫描）。
 ```text
 three-tool-sast-runner/
 ├── README.md / README.zh-CN.md
-├── docs/SPEC.md / SPEC.zh-CN.md
+├── docs/
+│   ├── SPEC.md / SPEC.zh-CN.md
+│   └── DEPLOYMENT.md / DEPLOYMENT.zh-CN.md
 ├── analy.config.example    # JSON 模板，复制到 scan/analy.config
 ├── requirements.txt        # 原生 YAML 校验所需的 Python 依赖
 ├── install/
@@ -46,7 +53,8 @@ three-tool-sast-runner/
 │   ├── IMPLEMENTATION_STATUS.md
 │   ├── cpp_check/scan.sh
 │   ├── clang_tidy/scan.sh
-│   └── clang_static_analyzer/scan.sh
+│   ├── clang_static_analyzer/scan.sh
+│   └── csharp_roslyn/scan.sh   # C# 通道：Roslyn + NetAnalyzers
 └── tests/
 ```
 
@@ -56,7 +64,7 @@ three-tool-sast-runner/
 
 | 分层标识 | 类别定义 | 生产者主体 | 在下游报告生成中的作用 |
 | :--- | :--- | :--- | :--- |
-| **`[RAW]`** | **分析器原生诊断层** | 编译器/分析器二进制直接写出的结构化文件 | **核心法定证据**：下游映射与评级引擎直接消费此层数据 |
+| **`[RAW]`** | **分析器原生诊断层**（Cppcheck XML v2、clang-tidy YAML、CSA Plist、C# NetAnalyzers SARIF） | 编译器/分析器二进制直接写出的结构化文件 | **核心法定证据**：下游映射与评级引擎直接消费此层数据 |
 | **`[RECEIPT]`** | **执行器元数据与收据层** | 自动化调度 Runner 脚本记录的环境与进程回执 | **审计与对账证据**：证明环境真实、命令可溯、所有 TU 均被执行 |
 | **`[CACHE]`** | **分析器内部缓存层** | 分析器二进制内部中间状态 | **性能优化数据**：证明启用了持久化构建缓存，非最终审计报告 |
 | **`[DERIVED]`** | **衍生统计与浏览层** | 后处理脚本或转换程序生成的 Markdown/HTML | **人工阅读辅助**：供开发者快速浏览，下游生成器不以此为数据源 |
@@ -106,6 +114,13 @@ uv run --frozen python scan/handoff.py export \
   --profile /path/to/product-profile.json \
   --run /path/to/results/RUN_ID \
   --output /path/to/new-product-delivery
+# C# 通道：不需要编译数据库，每次运行一个 .sln/.csproj：
+uv run --frozen bash scan/csharp_roslyn/scan.sh \
+  --scan-path /path/to/product/src --result-path /path/to/csharp-results
+uv run --frozen python scan/handoff.py export-csharp \
+  --profile /path/to/csharp-product-profile.json \
+  --run /path/to/csharp-results/RUN_ID \
+  --output /path/to/new-csharp-delivery
 ```
 
 执行器从每个扫描路径逐级向上寻找 `compile_commands.json`、
@@ -126,6 +141,8 @@ uv run --frozen python scan/handoff.py export \
 [`examples/runner-handoff/product-profile.example.json`](examples/runner-handoff/product-profile.example.json)，明确产品、组件、目标、配置、路径和语言范围。首个交付通道只接受一个编译数据库组、一个组件及一个目标/配置；每个选中 TU 都必须落在已声明路径/语言范围内。多组件或归属不清时须先由产品负责人拆分/确认，执行器不会从编译数据库推断业务产品。
 
 `scan/handoff.py export` 生成新的可移交目录，包含哈希绑定的文件清单、原样复制的原生扫描结果、源码/构建标识、类型化执行收据、实际工具版本、完整版本横幅、二进制哈希和计数；不包含映射、报告路径或发布策略。原始收据可能暴露主机绝对路径，原生输出可能含源码片段，转移前按产品方数据处理要求审核。参见[交付说明](examples/runner-handoff/README.md)。
+
+C# 对应入口为 `scan/handoff.py export-csharp`。它只接受纯 C# 运行（`tools: ["csharp_roslyn"]`、无编译数据库的源码范围）与 `languages: ["C#"]` 的 profile，把 `Microsoft.CodeAnalysis.NetAnalyzers` 版本绑定为 `tool_version`，并按 `<target_id>[<tfm>]` 声明每个已构建框架的目标身份。完整 profile、计数、版本规则与已知限制见[部署指南](docs/DEPLOYMENT.zh-CN.md)。
 
 接收端 `sast-report-pipeline` 才负责生成规范 `three-tool-input-1.0`、绑定冻结映射、严格审计、生成/验证报告并打包。扫描交付不等于报告、漏洞确认、发布批准或 IEC 62443 认证。
 

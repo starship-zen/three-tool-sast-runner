@@ -94,6 +94,24 @@ The primary objective is to produce an **immutable, self-contained, auditable ev
         └── analyzer-summary.md                 # [DERIVED] Summary markdown (TUs analyzed, bugs)
 ```
 
+The C# lane writes one additional module in place of modules 2–5:
+
+```text
+<product_name>-scan-bundle/
+└── 06-csharp-roslyn/                           # Module 6 (C# lane): Roslyn + NetAnalyzers
+    ├── result/
+    │   ├── csharp-report.sarif                 # [RAW] Per-framework runs concatenated for reading
+    │   └── csharp-report.<tfm>.sarif           # [RAW] One native SARIF per built target framework
+    └── csharp-artifacts/                       # [RECEIPT] Execution receipts
+        ├── command.txt                         # [RECEIPT] One dotnet build command per framework
+        ├── exit-code.txt                       # [RECEIPT] "<tfm> <exit code>" per framework
+        ├── version.txt                         # [RECEIPT] Captured `dotnet --version` banner
+        ├── receipt.json                        # [RECEIPT] Target frameworks, analyzers, per-framework build receipts
+        ├── summary.json                        # [DERIVED] Diagnostic counts and per-framework rows
+        ├── csharp-reconciliation.csv           # [RECEIPT] tfm,file,status (analyzed / failed / discovered)
+        └── per-tfm/                            # [RAW] Byte-identical per-framework compiler output
+```
+
 ---
 
 ## 5. Tool Contracts & Empirical Engine Rules
@@ -181,6 +199,7 @@ Before packaging or publishing a scan drop, the runner's self-test must verify:
 | :--- | :--- | :--- |
 | **Product Isolation** | Bundle contains only modules of the designated product | Downstream rejection; cannot certify product |
 | **TU Identity Parity** | `compile-db-selected-tus.txt` set == `cppcheck-artifacts/input-files.csv` set == `clang-tidy-summary.json.files` set == `tu-mapping.csv.file` set == CSA analysis targets | Coverage mismatch; reconciliation failure |
+| **C# Unit Parity** | Selected `.cs` units == union of the per-framework MSBuild `Compile` items == `csharp-reconciliation.csv` `analyzed` rows; selected units not compiled by any framework fail the scan | Coverage mismatch; `discovered` rows; export refusal |
 | **Raw Evidence Integrity** | `cppcheck-compile-report.xml` is valid XML v2; `.yaml` count matches warning TUs; `.plist` count == TU count | Classified as Unverified |
 | **Commit Traceability** | `code-state.txt` commit is a valid 40-character SHA-1 (not empty / not recorded) | Audit traceability failure |
 
@@ -303,6 +322,33 @@ native outputs can contain source excerpts; operators must apply their data
 handling policy before transferring a delivery. The delivery remains
 untrusted scanner evidence, not authenticated execution or release approval.
 
+The producer manifest carries no reporter-side field: it has no `assets`,
+`mapping_mode` or `producer_contract`, and its `delivery_status` is the fixed
+string `complete-scan-evidence; no release approval implied`. Those fields
+appear only after the receiver prepares canonical input, where
+`producer_contract` is `three-tool-sast-runner-1.2`, `schema_version` becomes
+`three-tool-input-1.0`, `mapping_mode` is `strict` and `assets` binds the
+reporter's frozen standards plus the family's mapping library.
+
+### 7.3 Producer C# product-scan delivery (2026-10-22)
+
+`scan/handoff.py export-csharp --profile PROFILE --run RUN --output NEW_DIRECTORY`
+is the C# counterpart of 7.2. It accepts only a C#-only run: `tools` must be
+`["csharp_roslyn"]`, `evidence_gate_required` must be `false`, the single group
+must be a source scope without a compilation database, and the profile's
+`languages` must be `["C#"]`. Native artifacts are SARIF 2.1.0, one per built
+target framework, each bound to the target identity `<target_id>[<tfm>]`; the
+merged report is delivered only as a supporting copy under
+`provenance/native-merged/`. `tool_version` is the
+`Microsoft.CodeAnalysis.NetAnalyzers` release resolved from the project's
+restore output, while the `dotnet --version` banner and the SARIF compiler
+driver stay separate provenance facts. Because the C/C++ certification reasons
+remain in a C# run's `release-gate.json` by design, the C# lane requires only
+that the single `csharp_roslyn` check reports no errors; a single-framework
+counter shape is not yet accepted by the receiver. The operational profile,
+counters, version rules and this limitation are documented in
+[DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## 8. Implemented Runner Safety Contracts (2026-10-22)
 
 ### 8.1 Scope
@@ -363,8 +409,12 @@ display values, and parse the documented JSON configuration.
 ### 8.8 Pinned Library Examples
 
 `examples/README.md` documents a vendored TinyXML2 C++ build/scan fixture and a
-GuardClauses C# build/run fixture. Each subset retains its license and a pinned
+GuardClauses C# fixture. Each subset retains its license and a pinned
 upstream commit with per-file SHA-256 checks in `tests/test_examples.py`. The C#
-fixture does not add C# analyzer support: direct `.cs` input must still fail before
-creating a run. Successful builds do not establish security coverage or release
-acceptance, and neither example is a vulnerability-detection benchmark.
+fixture's documented commands cover build/run only: scanning it requires the
+separate C# lane (`scan/csharp_roslyn/scan.sh`). Passing `.cs` input to
+`scan/scan_all.sh` still fails as an input error before a run is created,
+because that entry runs the C/C++-only scanner set and needs a compilation
+database; this rejection is not a statement about C# coverage. Successful builds
+do not establish security coverage or release acceptance, and neither example is
+a vulnerability-detection benchmark.

@@ -97,6 +97,24 @@
         └── analyzer-summary.md                 # [DERIVED] 可选：总括 Markdown 摘要
 ```
 
+C# 通道以单独的模块取代模块 2 至 5：
+
+```text
+<product_name>-scan-bundle/
+└── 06-csharp-roslyn/                           # 【模块六：C# 通道：Roslyn + NetAnalyzers】
+    ├── result/
+    │   ├── csharp-report.sarif                 # [RAW] 各框架 run 拼接后的阅读用报告
+    │   └── csharp-report.<tfm>.sarif           # [RAW] 每个已构建目标框架一份原生 SARIF
+    └── csharp-artifacts/                       # [RECEIPT] 执行收据
+        ├── command.txt                         # [RECEIPT] 每个框架一条 dotnet build 命令
+        ├── exit-code.txt                       # [RECEIPT] 逐框架的“<tfm> <退出码>”
+        ├── version.txt                         # [RECEIPT] 捕获的 `dotnet --version` 横幅
+        ├── receipt.json                        # [RECEIPT] 目标框架、分析器、逐框架构建收据
+        ├── summary.json                        # [DERIVED] 诊断计数与逐框架行
+        ├── csharp-reconciliation.csv           # [RECEIPT] tfm,file,status（analyzed / failed / discovered）
+        └── per-tfm/                            # [RAW] 逐框架编译器输出的原样副本
+```
+
 ---
 
 ## 5. 各工具技术契约细则与实测引擎机制
@@ -166,6 +184,7 @@
 | **产品隔离** | 制品内仅包含单一产品，无同级混装其他产品数据 | 下游报错拒收，无法生成合法单产品报告 |
 | **TU 身份集合闭环** | `compile-db-selected-tus.txt` 集合 == `cppcheck-artifacts/input-files.csv` 集合 == `clang-tidy-summary.json.files` 集合 == `tu-mapping.csv` 的 file 集合 == CSA 分析目标集合 | 判定为扫描范围不一致，对账失败 |
 | **原生证据完整度** | `cppcheck-compile-report.xml` 包含合法 XML 结构；<br>`fixes/` 下的 `.yaml` 数量与 summary 中告警文件数匹配；<br>`csa-native/` 下的 `.plist` 数量严格等于 TU 总数 $N$ | 判定为假报告或未验证状态（Unverified） |
+| **C# 单元对账** | 选中 `.cs` 单元集合 == 各框架 MSBuild `Compile` 项并集 == `csharp-reconciliation.csv` 的 `analyzed` 行；未被任何框架编译的选中单元使扫描失败 | 对账失败；出现 `discovered` 行；导出被拒 |
 | **版本不可篡改追溯** | `code-state.txt` 中的 Commit 为完整 40 位 SHA-1，非 `not recorded` 或留空 | 审计不可否认性失败，Release Gate 阻断 |
 
 ---
@@ -245,6 +264,12 @@ clang-tidy 目标包含零告警单元时，使用以下显式支持证据条目
 
 首个通道仅支持一个组、组件、目标和配置。所有选中 TU 必须符合档案路径/语言范围；多组或失败门禁会被拒绝，不从编译数据库推断业务归属。绝对选中路径作为不透明分析单元 ID 保留，仓库相对范围另行绑定到 Git 基线。原始收据可能暴露主机路径，原生输出可能包含源码片段，转移前须按产品方数据策略处理。该交付是未经认证的扫描证据，不是发布批准。
 
+生产端清单不含接收端字段：没有 `assets`、`mapping_mode` 或 `producer_contract`，`delivery_status` 固定为 `complete-scan-evidence; no release approval implied`。这些字段只在接收端完成规范输入准备后出现：`producer_contract` 为 `three-tool-sast-runner-1.2`，`schema_version` 变为 `three-tool-input-1.0`，`mapping_mode` 为 `strict`，`assets` 绑定接收端冻结的标准资产与所属家族的映射库。
+
+### 7.3 Runner 产品范围 C# 证据交付（2026-10-22）
+
+`scan/handoff.py export-csharp --profile PROFILE --run RUN --output NEW_DIRECTORY` 是 7.2 的 C# 对应入口。它只接受纯 C# 运行：`tools` 必须为 `["csharp_roslyn"]`，`evidence_gate_required` 必须为 `false`，唯一组必须是不含编译数据库的源码范围，且档案 `languages` 必须为 `["C#"]`。原生产件为 SARIF 2.1.0，每个已构建目标框架一份，各自绑定目标身份 `<target_id>[<tfm>]`；合并报告仅作为辅助副本交付于 `provenance/native-merged/`。`tool_version` 是项目还原产物解析出的 `Microsoft.CodeAnalysis.NetAnalyzers` 版本；`dotnet --version` 横幅与 SARIF 编译器 driver 分列为独立来源事实。C# 运行的 `release-gate.json` 按设计仍保留 C/C++ 认证理由，因此本通道只要求唯一的 `csharp_roslyn` 检查无错误；单框架计数形状尚未被接收端接受。运维档案、计数、版本规则与该项限制见 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md)。
+
 ## 8. 已实现的执行器安全契约（2026-10-22）
 
 ### 8.1 范围
@@ -291,7 +316,5 @@ clang-tidy 目标包含零告警单元时，使用以下显式支持证据条目
 
 ### 8.8 固定版本的示例库
 
-`examples/README.md` 记录 TinyXML2 C++ 构建/扫描样例和 GuardClauses C# 构建/运行
-样例。两个源码子集均保留许可证、固定上游提交和逐文件 SHA-256，并由
-`tests/test_examples.py` 校验。C# 样例不新增 C# 分析器支持：直接输入 `.cs` 仍须在
-创建运行目录前拒绝。构建成功不代表安全覆盖或发布验收通过，两个样例也不作为漏洞检出率基准。
+`examples/README.md` 记录 TinyXML2 C++ 构建/扫描样例和 GuardClauses C# 样例。两个源码子集均保留许可证、固定上游提交和逐文件 SHA-256，并由
+`tests/test_examples.py` 校验。C# 样例的文档命令只覆盖构建/运行；扫描它需要独立的 C# 通道（`scan/csharp_roslyn/scan.sh`）。向 `scan/scan_all.sh` 直接传入 `.cs` 仍会在创建运行目录前以输入错误失败，因为该入口只运行 C/C++ 扫描器集合并需要编译数据库；该拒绝不构成对 C# 覆盖能力的结论。构建成功不代表安全覆盖或发布验收通过，两个样例也不作为漏洞检出率基准。

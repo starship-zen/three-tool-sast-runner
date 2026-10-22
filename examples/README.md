@@ -6,7 +6,7 @@
 | 语言 | 示例库 | 固定版本 | 验证边界 |
 | --- | --- | --- | --- |
 | C++ | [TinyXML2](https://github.com/leethomason/tinyxml2/tree/9148bdf719e997d1f474be6bcc7943881046dba1) | 11.0.0 | 构建、运行及现有三工具扫描 |
-| C# | [GuardClauses](https://github.com/ardalis/GuardClauses/tree/ad43aa02babf3bc8aee8efc2258f5ad3571c8ec5) | v5.0 | .NET 8 构建和运行；当前不支持 C# 安全扫描 |
+| C# | [GuardClauses](https://github.com/ardalis/GuardClauses/tree/ad43aa02babf3bc8aee8efc2258f5ad3571c8ec5) | v5.0 | .NET 8 构建和运行；C# 扫描走独立的 C# 通道 |
 
 这些是真实库的最小源码子集，不是故意植入漏洞的检测基准，不保证固定的告警数量。
 本仓库新增的冒烟程序与上游源码分开放置；未复制上游完整测试集。
@@ -31,7 +31,7 @@ uv run --frozen --offline bash scan/scan_all.sh --scan-path examples/cpp --resul
 即使三个工具执行成功，版本证据或其他门禁不满足时，主命令仍可能返回 3。
 不要将 CTest 通过、零告警或样例结果当作客户发布验收。
 
-## C#: build and run only
+## C#: build and run
 
 需要 .NET 8 SDK。首次还原需要访问 NuGet，下载上游指定的
 `Microsoft.SourceLink.GitHub` 8.0.0 构建依赖。只验证 `net8.0`，不还原或验证上游其他目标框架。
@@ -45,9 +45,12 @@ dotnet examples/csharp/smoke/bin/Release/net8.0/Smoke.dll
 冒烟程序验证正常字符串可用、空值被拒绝、负数被拒绝。
 上游 SourceLink 构建任务可能因缺少 Git 元数据而告警；来源以固定提交及文件哈希记录为准，
 不将本仓库的 Git 信息视为上游 SourceLink 认证。
-这不是 C# SAST 验证：当前 runner 没有 C# 后端，直接传入 `.cs` 会报输入错误，
-不能将混合目录中的 C# 文件计作已覆盖。覆盖 C# 安全扫描需要后续接入独立的 C# 分析器
-及其原生证据、风险与映射支持，本次未实现。
+不是 C# SAST 验收：本节命令只验证构建与运行。C# 扫描走独立通道
+`scan/csharp_roslyn/scan.sh`（每次一个 `.sln`/`.csproj`，逐目标框架构建）并配合
+`scan/handoff.py export-csharp` 导出，详见[部署指南](../docs/DEPLOYMENT.zh-CN.md)。
+向 `scan/scan_all.sh` 直接传入 `.cs` 仍会报输入错误，因为该入口只运行 C/C++ 扫描器集合并
+需要编译数据库；混在 C/C++ 目录中的 `.cs` 文件不会被三工具证据计作已覆盖。
+本示例本身没有做过 C# 扫描验收。
 
 ## Source integrity and regression checks
 
@@ -55,6 +58,6 @@ dotnet examples/csharp/smoke/bin/Release/net8.0/Smoke.dll
 uv run --frozen --offline python -m unittest discover -s tests -p test_examples.py
 ```
 
-此检查验证所收源码与记录哈希相符，并确认 C# 输入不会被伪报为三工具扫描成功。
+此检查验证所收源码与记录哈希相符，并确认 C# 输入只路由到 C# 通道，不会被三工具扫描器接管。
 哈希校验不是上游签名认证，也不替代实际构建、运行或扫描。
 构建产物和 `examples/results/` 已忽略，不提交编译缓存、原始扫描结果或 NuGet 缓存。
