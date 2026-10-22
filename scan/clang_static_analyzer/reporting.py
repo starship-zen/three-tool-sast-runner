@@ -58,7 +58,6 @@ def generate(output, result, group, entries, scopes, policy, binaries):
     failed = [item["file"] for item in files if not item["ok"]]
     status = "failed" if files and len(failed) == len(files) else "partial" if failed else "issues" if bugs else "ok"
     result.update(status=status, reports=bugs, failed=failed)
-    result["ok"] = result["ok"] and not bugs
     lines = ["# Static Analyzer Summary", "", "- Engine: clang --analyze over compile_commands.json",
              "- Analyzed translation units: {}/{}".format(result.get("analyzed", 0), result.get("total", 0)),
              "- Bugs: " + str(bugs), "", "| Scope | Status | Bugs | Failed TUs | Analyzed | Report | Log |",
@@ -69,7 +68,8 @@ def generate(output, result, group, entries, scopes, policy, binaries):
     rows = []
     for item in files:
         links = [link(Path(path).relative_to(output)) for path in item.get("html_reports", [])]
-        links.append(link("reports/" + item["unit_id"] + ".plist", "Plist"))
+        artifact = Path(item.get("artifact", output / "reports" / (item["unit_id"] + ".plist")))
+        links.append(link(artifact.relative_to(output), "Plist"))
         rows.append("<tr><td>" + html.escape(item["file"]) + "</td><td>"
                     + str(item.get("diagnostics", "unknown")) + "</td><td>" + " ".join(links) + "</td></tr>")
     page(output / "index.html", "Clang Static Analyzer reports", "<p>Status: " + status

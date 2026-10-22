@@ -269,7 +269,7 @@ if "--version" in sys.argv:
 elif "--xml" in sys.argv:
     print('<results version="2"><errors/></results>', file=sys.stderr)
 elif "--analyze" in sys.argv:
-    if "-analyzer-output=plist" in sys.argv:
+    if "-analyzer-output=plist-html" in sys.argv:
         with open(sys.argv[sys.argv.index("-o") + 1], "wb") as stream:
             plistlib.dump({"diagnostics": []}, stream)
 else:
@@ -389,8 +389,22 @@ else:
                   "files": [{"file": str(self.first), "unit_id": "unit", "ok": True, "diagnostics": 1}]}
         generate(output, result, {}, [], [], {}, {})
         self.assertEqual(result["status"], "issues")
-        self.assertFalse(result["ok"])
+        self.assertTrue(result["ok"], "a parsed CSA finding is a successful completed scan, not a tool failure")
         self.assertTrue((output / "index.html").is_file())
+
+    def test_csa_execution_failure_stays_failed_when_other_units_have_findings(self):
+        from clang_static_analyzer.reporting import generate
+        output = self.folder / "csa-partial-summary"
+        output.mkdir()
+        result = {"ok": False, "total": 2, "analyzed": 1,
+                  "files": [
+                      {"file": str(self.first), "unit_id": "unit", "ok": True, "diagnostics": 1},
+                      {"file": str(self.second), "unit_id": "failed", "ok": False, "diagnostics": 0},
+                  ]}
+        generate(output, result, {}, [], [], {}, {})
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["reports"], 1)
+        self.assertFalse(result["ok"])
 
     def test_tidy_severity_and_remediation_are_populated(self):
         from types import SimpleNamespace

@@ -1,0 +1,20 @@
+{
+  "schema_version": "three-tool-product-profile-1.0",
+  "product_id": "replace-with-approved-product-id",
+  "display_name": "Replace with the owner-approved product name",
+  "repository": "https://example.invalid/org/repository",
+  "component_id": "replace-with-approved-component-id",
+  "target_id": "replace-with-approved-build-target-id",
+  "configuration": "replace-with-build-configuration-id",
+  "included_paths": [
+    "src/**"
+  ],
+  "excluded_paths": [
+    "generated/**",
+    "thirdparty/**"
+  ],
+  "languages": [
+    "C++"
+  ],
+  "unsupported_languages": []
+}

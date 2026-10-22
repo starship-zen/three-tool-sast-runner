@@ -10,32 +10,66 @@ round. LLVM 10 and the Cppcheck development build still fail version evidence
 checks. Execution may succeed while the main command returns 3. Do not remove
 this check or relabel the installed binaries to make it pass.
 
-## 2. Downstream Schema And Ingestion: Deferred Integration
+## 2. Product-Scoped Evidence Delivery: Public C++ Sample Accepted
 
-The reporting consumer is `sast-report-pipeline`; its implementation has been
-located during review. The runner does not yet implement its authoritative
-`three-tool-input-1.0` contract and continues to export the honestly labeled
-`scanner-evidence-1` manifest with `downstream_compatible=false`.
+The runner continues to emit its execution evidence as
+`scanner-evidence-1`, with `downstream_compatible=false` and
+`release_ready=false`. `scan/handoff.py export` now copies one completed,
+evidence-gated product scope into a portable `three-tool-scan-delivery-1.0`
+directory. Its exact profile and command are documented in
+`examples/runner-handoff/README.md`.
 
-Follow-up integration must pin the actual consumer version and schema/validator,
-provision its dependencies, and use a known-good evidence bundle as a reference.
-Implement its exact exporter without guessing fields; pin the
-generator version; validate relocation and strict real ingestion; inspect all
-generated reports including the zero-diagnostic case. Deleted Plists, changed
-hashes and inconsistent TU sets must be rejected in negative tests. No extra
-public scanner argument or acceptance-bypass switch is introduced.
+The delivery preserves native outputs byte-for-byte and hashes its manifest,
+native files and copied build/source/version/scanner receipts. Its profile
+contains only owner-declared product, repository, component, target,
+configuration, path and language scope. It does not carry reporter paths,
+standards, mappings or report orchestration. The receiving
+`sast-report-pipeline` owns validation/adaptation into canonical
+`three-tool-input-1.0`, binding its own frozen taxonomy assets and applying the
+strict mapping/report gates. A delivery is not itself a canonical report
+input, proof of authenticated execution, vulnerability confirmation or release
+approval.
 
-## 3. Business Product Boundary: Owner Mapping Required
+Synthetic producer tests cover positive/zero analyzer output, zero/mixed
+clang-tidy YAML, failed evidence gates, multi-group refusal, source-scope
+refusal, prerelease/native version conflicts, tamper rejection, relocation and
+no-overwrite behavior. A separate qualified Ubuntu 24.04 / LLVM 18.1.3 /
+Cppcheck 2.22.0 public C++ sample completed both selected units. Its unchanged
+native evidence passed standalone export, relocation, receiver preparation,
+strict mapping audit, candidate verification, packaging and fresh HTTP import.
+The original source path was unavailable during receiving acceptance; no
+scanner was rerun. This establishes that sample's handoff, not deployment or
+business-product acceptance. Report release remains blocked on human decisions.
 
-One Git repository is not one business product. Product IDs, build targets,
-included/excluded modules and shared-module ownership need owner confirmation.
-The internal product policy will be derived from those confirmed mappings, not
-from a new user-facing product/checks parameter. CMake targets may inform that
-mapping, but cannot establish business ownership by themselves.
+## CSA single-pass output
 
-Until that mapping exists, preserve useful scan results but do not certify
-product isolation. Mixed-product rejection versus independent product bundles
-also requires a confirmed policy. No product IDs are invented in this round.
+Each selected TU now uses one native `plist-html` analyzer invocation instead
+of a full plist analysis followed by another full HTML analysis. Per-TU output
+directories isolate native plist and sibling HTML, and one actual command
+receipt binds the plist path. The standard evidence snapshot still exports
+one unchanged plist per TU under `csa-native/`; the downstream delivery format
+is unchanged. Valid zero-diagnostic plist may have no HTML; findings require
+nonempty regular HTML reports. Failed exit, invalid/non-plist output or missing
+positive HTML remains an attributable failed TU, not a successful scan.
+
+The locked Python suite passes 157 tests, including eight single-pass
+regressions and exporter root/scope regressions. Native LLVM 18.1.3 probes
+cover zero, positive and cross-file findings. The two-TU public sample completed
+in 84.344 seconds, with one CSA invocation per TU. Earlier duplicate-pass runs
+were capped partials, so no percentage speedup is claimed. The reporter's
+locked 235-test run includes the actual exported sample without an opt-in skip.
+
+## 3. Business Product Boundary: Explicit Owner Scope Required
+
+One Git repository is not one business product. Each product profile must be
+provided by its owner with an approved product ID, component, target,
+configuration, included/excluded paths and language scope. The first exporter
+lane accepts one component/target/configuration and verifies that every
+selected unit falls within the declared path/language scope. It rejects
+multiple compile-database groups and does not infer components or shared-module
+ownership from CMake target names. Profile validation is not independent proof
+of business ownership; operators must resolve and document scope before
+exporting, and must create separate deliveries per product.
 
 ## 4. Cross-Run Cache: Implemented For Qualified Main Runs
 

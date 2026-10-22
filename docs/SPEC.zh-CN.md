@@ -141,7 +141,9 @@
 
 ### 5.4 Clang Static Analyzer 规范 (`05-clang-static-analyzer/`)
 1. **原生 Plist 强制落盘机制 (`[RAW]` 与零结果机制)：**
-   * 调度脚本通过 `clang --analyze` 遍历编译数据库时，必须配置 `-Xclang -analyzer-output=plist -o csa-native/<slug>.plist`。
+   * 每个 TU 只执行一次 `clang --analyze ... -Xanalyzer -analyzer-output=plist-html -o reports/<slug>/<slug>.plist`，由 LLVM 同次生成支持跨文件路径的原生 plist 与 HTML。每个 TU 使用独立目录，导出以真实执行收据的 `artifact` 为准，不猜测平铺路径，也不伪造第二条 `html_execution`。
+   * 合法零诊断 plist 可以没有 HTML；有诊断则必须有非空普通 HTML 文件。非零退出、无效 plist 或有诊断却无 HTML 均判执行失败。不根据普通单文件 plist 的零结果跳过 HTML，因为它可能遗漏多文件格式支持的跨文件路径。
+   * 跨文件缺陷的原生计数可能因此增加；对账以诊断记录为准，不能把联合输出消费者重复打印的警告行数当作发现项数。
    * **实测机制必须知晓：** **即使该文件没有任何缺陷，Clang 依然会写出一个合法的空 Plist 文件**（包含完整的 XML 声明和 `<dict>` 标签，但 `<key>diagnostics</key><array></array>` 为空）。
    * **门禁铁律：** `csa-native/` 目录下的 `.plist` 文件总数，**必须严格等于选定的 TU 总数 $N$**！
 2. **调度对账表 (`[RECEIPT]`)：**
@@ -171,7 +173,9 @@
 ## 7. 对接下游离线报告生成器
 
 下游是独立的 `sast-report-pipeline` 仓库，不是历史合作方混包适配器。
-仅有编号目录还不是合法输入；Runner 必须同时生成下述根清单。
+其规范 `three-tool-input-1.0` 清单不是 Runner 的产品交付格式：本仓库导出
+`three-tool-scan-delivery-1.0`，接收端校验后绑定其本地冻结资产并准备报告输入。
+仅有编号目录不能作为任一边界的合法输入。
 
 ```bash
 # 生成待审候选报告包，不等于客户发布批准。
@@ -184,9 +188,9 @@ python3 scripts/three_tool_report.py generate \
 
 PDF 是命令行可选输出，须单独预置并验收渲染工具链。本机网页工作台当前不生成 PDF。
 
-### 7.1 根清单与零诊断交接补充（2026-10-21）
+### 7.1 接收端根清单与零诊断契约（2026-10-21）
 
-根目录必须包含 `manifest.json`，采用 `schema_version: "three-tool-input-1.0"`
+报告消费者的根目录必须包含 `manifest.json`，采用 `schema_version: "three-tool-input-1.0"`
 和 `producer_contract: "three-tool-sast-runner-1.2"`。必需部分包括 `run_id`、
 `project`（含 `product_id`）、`source`、`tool_runs`、`artifacts`、`assets` 与
 `provenance_inputs`。引用路径均相对根目录，并绑定实际 SHA-256。可运行的合成交接
@@ -233,16 +237,24 @@ clang-tidy 目标包含零告警单元时，使用以下显式支持证据条目
 仍须提供真实原生零结果文件。收据校验只证明所交证据内部一致，不认证执行、源码不可变性、
 漏洞确认或发布批准。
 
+### 7.2 Runner 产品范围证据交付（2026-10-22）
+
+使用 `scan/handoff.py export --profile PROFILE --run RUN --output NEW_DIRECTORY`，将一个已完成且通过证据门禁的编译数据库组导出为 `three-tool-scan-delivery-1.0`。产品档案 `three-tool-product-profile-1.0` 只声明产品 ID/名称、仓库标识、组件、目标、配置、包含/排除路径和支持/不支持语言；不包含映射、标准资产或接收端路径。
+
+交付根目录含 `manifest.json` 与 `delivery-receipt.json`。清单复用规范输入的 project/source/component/tool_run/artifact/provenance 字段形状，但不是 `three-tool-input-1.0`；文件使用相对路径并绑定大小和 SHA-256。它保留原样的原生字节、实际数值版本、完整版本横幅、二进制哈希、源码/构建/执行收据和计数。缺失 clang-tidy YAML 的单元有类型化引用指向原始 per-file 零结果收据；接收端须解析原生 YAML 并自行生成规范计数收据，不合成空 YAML。
+
+首个通道仅支持一个组、组件、目标和配置。所有选中 TU 必须符合档案路径/语言范围；多组或失败门禁会被拒绝，不从编译数据库推断业务归属。绝对选中路径作为不透明分析单元 ID 保留，仓库相对范围另行绑定到 Git 基线。原始收据可能暴露主机路径，原生输出可能包含源码片段，转移前须按产品方数据策略处理。该交付是未经认证的扫描证据，不是发布批准。
+
 ## 8. 已实现的执行器安全契约（2026-10-22）
 
 ### 8.1 范围
 
-本节覆盖安装清理、编译配置选择、衍生 HTML 和文档配置，不实现第 7 节下游导出器，
-不认证产品隔离，也不升级分析器版本。
+本节覆盖安装清理、编译配置选择、衍生 HTML、产品范围证据交付和文档配置；不实现接收端规范映射/报告适配器，不独立认证业务归属，也不升级分析器版本。
 
 ### 8.2 入口
 
-使用 `bash scan/scan_all.sh [--scan-path PATH ...] [--result-path PATH]`。
+环境预装后，使用 `uv run --frozen --offline bash scan/scan_all.sh
+[--scan-path PATH ...] [--result-path PATH]`。
 未提供命令行值时，从 `scan/analy.config` 读取 JSON；根目录模板须复制到此处。
 `bash install/preflight.sh` 仅检查二进制可用性。
 

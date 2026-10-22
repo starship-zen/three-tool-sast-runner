@@ -6,7 +6,8 @@
 
 > **当前状态：** 已有扫描执行器实现，端到端验收尚未完成。
 > 当前输出 `scanner-evidence-1`，明确标记 `downstream_compatible=false` 和
-> `release_ready=false`。下游契约导出和业务产品隔离继续暂缓，详见
+> `release_ready=false`；另可导出产品范围的 `three-tool-scan-delivery-1.0`。
+> 报告消费者负责绑定其本地映射资产并生成标准 `three-tool-input-1.0`；交付包不等于报告或发布批准。详见
 > [剩余验收工作](scan/IMPLEMENTATION_STATUS.md)。
 
 [示例库与验证命令](examples/README.md)：固定版本的 TinyXML2（C++，构建及扫描）和
@@ -20,7 +21,7 @@ GuardClauses（C#，仅构建/运行；尚未实现 C# 扫描）。
 1. 从 CMake 导出的 `compile_commands.json` 自动解析出被测的编译单元（TU）；
 2. 在**完全相同的 Git 提交与相同的编译数据库**基线上，无缝并行调度 **Cppcheck (2.22+)**、**Clang-Tidy (LLVM 14+)**、**Clang Static Analyzer (LLVM 14+)**；
 3. 将产物整理为具有严格分层标识的自包含证据包（`[RAW]` 原生诊断、`[RECEIPT]` 运行收据、`[CACHE]` 内部缓存、`[DERIVED]` 衍生摘要）；
-4. 以 `three-tool-input-1.0` 为目标契约，支持后续离线报告的 CWE Top 25:2025、OWASP Top 10:2025 映射和 Critical/High/Medium/Low 四级风险评定。当前内部证据包尚不能直接输入下游生成器。
+4. 导出可移交的产品范围 `three-tool-scan-delivery-1.0`，包含未修改的原生结果及哈希绑定的扫描/构建/版本收据。独立报告消费者负责绑定本地标准和映射，再准备规范报告输入。
 
 完整技术规约与引擎实测行为请参考 [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md)（中文）或 [docs/SPEC.md](docs/SPEC.md)（英文）。
 
@@ -79,15 +80,13 @@ three-tool-sast-runner/
 
 ## 5. 快速上手
 
-在目标 Ubuntu 24.04 主机上，从仓库根目录执行。需要 Python 3.10+，并另外准备
+在目标 Ubuntu 24.04 主机上，从仓库根目录执行。先用 `uv sync --frozen` 准备锁定的 Python 3.12.15 环境，并另外准备
 Cppcheck 2.22+ 和 LLVM 14+。内置 Cppcheck 源码仍是开发快照，不满足证据门禁的版本要求。
 精简 Ubuntu 镜像还需 `python3-venv` 创建虚拟环境、`xz-utils` 解压内置源码；
 源码编译另需相应构建工具链。
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -r requirements.txt
+uv sync --frozen
 bash install/preflight.sh
 cp analy.config.example scan/analy.config
 ```
@@ -97,12 +96,16 @@ cp analy.config.example scan/analy.config
 不是当前 Shell 目录。不支持 Shell 赋值和旧 `SCAN_CODE_DIR` / `BUILD_DIR` 字段。
 
 ```bash
-bash scan/scan_all.sh
+uv run --frozen bash scan/scan_all.sh
 # 等价的命令行输入；其中相对路径以当前目录为基准：
-bash scan/scan_all.sh --scan-path /path/to/product/src --result-path /path/to/results
+uv run --frozen bash scan/scan_all.sh --scan-path /path/to/product/src --result-path /path/to/results
 # 只扫描临时缺陷样例，不扫描所传业务源码：
-bash scan/verify.sh --scan-path /path/to/product/src --result-path /path/to/smoke-results
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+uv run --frozen bash scan/verify.sh --scan-path /path/to/product/src --result-path /path/to/smoke-results
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen python -m unittest discover -s tests
+uv run --frozen python scan/handoff.py export \
+  --profile /path/to/product-profile.json \
+  --run /path/to/results/RUN_ID \
+  --output /path/to/new-product-delivery
 ```
 
 执行器从每个扫描路径逐级向上寻找 `compile_commands.json`、
@@ -117,24 +120,16 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 
 ---
 
-## 6. 下游自动化报告生成对接（目标契约）
+## 6. 产品范围证据交付
 
-下游是独立的 `sast-report-pipeline`。以下是目标接口，不是当前执行器已经打通的交接流程。
-须按 [SPEC 第 7 节](docs/SPEC.zh-CN.md#7-对接下游离线报告生成器)
-生成根清单，包含 v1.2 producer 标记、本地冻结资产和哈希绑定收据；仅有编号目录不能导入。
-clang-tidy 零告警仅可在显式 summary 收据校验通过后省略 YAML，不得伪造 YAML。
+复制并填写运维方维护的
+[`examples/runner-handoff/product-profile.example.json`](examples/runner-handoff/product-profile.example.json)，明确产品、组件、目标、配置、路径和语言范围。首个交付通道只接受一个编译数据库组、一个组件及一个目标/配置；每个选中 TU 都必须落在已声明路径/语言范围内。多组件或归属不清时须先由产品负责人拆分/确认，执行器不会从编译数据库推断业务产品。
 
-```bash
-# 生成待审候选报告包，不等于客户发布批准。
-python3 scripts/three_tool_report.py generate \
-  --product <product_id> \
-  --manifest "<output_dir>/manifest.json" \
-  --output "<report_run_dir>" \
-  --mapping-mode strict
-```
+`scan/handoff.py export` 生成新的可移交目录，包含哈希绑定的文件清单、原样复制的原生扫描结果、源码/构建标识、类型化执行收据、实际工具版本、完整版本横幅、二进制哈希和计数；不包含映射、报告路径或发布策略。原始收据可能暴露主机绝对路径，原生输出可能含源码片段，转移前按产品方数据处理要求审核。参见[交付说明](examples/runner-handoff/README.md)。
 
-产物是候选报告，不是客户发布或 IEC 62443 认证。命令行 PDF 须另行验收渲染工具链，
-网页工作台当前不支持 PDF。执行器测试通过，不证明下游导入、产品归属、映射或发布门禁通过。
+接收端 `sast-report-pipeline` 才负责生成规范 `three-tool-input-1.0`、绑定冻结映射、严格审计、生成/验证报告并打包。扫描交付不等于报告、漏洞确认、发布批准或 IEC 62443 认证。
+
+CSA 使用 LLVM 原生 `plist-html`：每个 TU 只分析一次，在独立目录同时生成两种格式。合法零诊断 plist 可无 HTML，有诊断则须有 HTML。报告输入仍为原生 plist，执行收据只记录实际运行的命令。
 
 ---
 

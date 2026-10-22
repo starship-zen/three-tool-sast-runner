@@ -149,7 +149,17 @@ The primary objective is to produce an **immutable, self-contained, auditable ev
 
 ### 5.4 Clang Static Analyzer Contract (`05-clang-static-analyzer/`)
 - **Native Plist Output (`[RAW]`):**
-  Invoked per TU via `clang --analyze ... -Xclang -analyzer-output=plist -o csa-native/<slug>.plist`.
+  Invoke once per TU via `clang --analyze ... -Xanalyzer -analyzer-output=plist-html -o reports/<slug>/<slug>.plist`.
+  LLVM writes multi-file native plist and HTML from the same analysis. Each TU
+  has its own directory; the execution receipt's `artifact` is authoritative
+  for export, rather than a guessed flat path. Record one real command receipt,
+  not a fabricated second `html_execution`. No second HTML analysis is run.
+  A valid zero-diagnostic plist needs no HTML; positive diagnostics require
+  nonempty regular HTML reports. Nonzero exit, invalid plist or missing positive
+  HTML fails completion. Do not skip HTML based on an ordinary single-file
+  plist: that format can omit cross-file paths supported by `plist-html`.
+  Native finding totals may therefore increase for cross-file defects; compare
+  diagnostic records, not repeated warning lines from combined consumers.
   * **Empirical Engine Rule:** When a Translation Unit has **0 bugs, Clang STILL outputs a valid empty Plist file** (containing valid XML headers and `<dict>` structure, with an empty `<array></array>` under `<key>diagnostics</key>`).
   * **Hard Gate:** Exactly $N$ `.plist` files must exist in `csa-native/`, corresponding 1-to-1 to the $N$ selected TUs.
 - **TU Reconciliation CSV (`[RECEIPT]`):**
@@ -179,8 +189,11 @@ Before packaging or publishing a scan drop, the runner's self-test must verify:
 ## 7. Downstream Ingestion Contract
 
 The consumer is the standalone `sast-report-pipeline` repository, not the
-historical partner-drop adapter. A numbered directory alone is not a valid
-input: the runner must also emit the root manifest described below.
+historical partner-drop adapter. Its canonical `three-tool-input-1.0` manifest
+is not the runner's product-delivery format. The producer emits
+`three-tool-scan-delivery-1.0`; the receiving consumer validates that delivery,
+binds its locally approved standards/mappings and prepares canonical report
+input. A numbered directory alone is not valid input to either boundary.
 
 ```bash
 # Generate a candidate report package; this is not customer release approval.
@@ -194,16 +207,17 @@ python3 scripts/three_tool_report.py generate \
 PDF is optional CLI output requiring a separately provisioned and verified
 renderer toolchain. The local web workbench does not currently generate PDF.
 
-### 7.1 Root manifest and zero-diagnostic handoff clarification (2026-10-21)
+### 7.1 Consumer root manifest and zero-diagnostic contract (2026-10-21)
 
-The root `manifest.json` is mandatory. It uses
+The consumer's root `manifest.json` is mandatory. It uses
 `schema_version: "three-tool-input-1.0"` and
 `producer_contract: "three-tool-sast-runner-1.2"`. Required sections are
 `run_id`, `project` (including `product_id`), `source`, `tool_runs`, `artifacts`,
 `assets`, and `provenance_inputs`. All referenced paths are relative to this
-root and SHA-256-bound. The runnable synthetic handoff and complete field
-example are maintained by `sast-report-pipeline` in `docs/runner-handoff.md`
-and `examples/runner-handoff/`; these are fixtures, not executed scans.
+root and SHA-256-bound. The receiving consumer owns mapping and report policy;
+the producer does not embed taxonomy assets in its delivery. The runnable
+synthetic canonical fixture is maintained by `sast-report-pipeline`; it is not
+an executed scan.
 
 - Put only real native XML/YAML/plist in `artifacts`. Bind each to its actual
   tool/version/component/configuration/target and source analysis unit when
@@ -256,17 +270,52 @@ record. Cppcheck and CSA still require their real native zero-output files.
 Summary validation proves consistency of supplied receipts, not authenticated
 execution, immutable source, vulnerability confirmation or release approval.
 
+### 7.2 Producer product-scan delivery (2026-10-22)
+
+`scan/handoff.py export --profile PROFILE --run RUN --output NEW_DIRECTORY`
+exports one completed, evidence-gated compile-database group as a standalone
+`three-tool-scan-delivery-1.0`. Its exact operator profile is
+`three-tool-product-profile-1.0`: product ID/display name, repository label,
+explicit component/target/configuration, repository-relative included and
+excluded paths, and supported/unsupported languages. It contains no reporter
+checkout locator, standards asset, rule mapping or release policy.
+
+The delivery root has `manifest.json` and `delivery-receipt.json`. The manifest
+preserves canonical-shaped project/source/component/tool-run/artifact and
+provenance fields, but is deliberately not `three-tool-input-1.0`. It binds
+each native artifact and copied provenance file by relative path, size and
+SHA-256; preserves actual numeric tool release tokens alongside full captured
+version banners and binary hashes; and records selected-unit, artifact and
+scanner receipt counts. The receipt binds the manifest and every other payload
+file. Native scanner bytes are copied unchanged. Missing clang-tidy YAML is
+represented by a typed reference to the original per-file zero-result runner
+receipt; the receiver parses native YAML and derives its own v1.2 native-count
+receipt. No empty YAML or diagnostic is synthesized.
+
+This first lane supports exactly one group, component, build target and
+configuration. All selected units must match the profile's explicit path and
+language scope. It rejects multiple groups and failed/incomplete gates; it does
+not infer business product/component ownership from the compilation database.
+Selected path strings are preserved as opaque analysis-unit IDs for exact
+clang-tidy `MainSourceFile` matching, while repository-relative scope is bound
+separately to the captured Git root. Raw provenance may disclose host paths and
+native outputs can contain source excerpts; operators must apply their data
+handling policy before transferring a delivery. The delivery remains
+untrusted scanner evidence, not authenticated execution or release approval.
+
 ## 8. Implemented Runner Safety Contracts (2026-10-22)
 
 ### 8.1 Scope
 
 These operational contracts cover installer cleanup, compile-context selection,
-derived HTML and documented configuration. They do not implement section 7's
-downstream exporter, certify product isolation or upgrade analyzer versions.
+derived HTML, product-scan delivery and documented configuration. They do not
+implement the consumer's canonical mapping/report adapter, independently
+certify business ownership or upgrade analyzer versions.
 
 ### 8.2 Entry Points
 
-Use `bash scan/scan_all.sh [--scan-path PATH ...] [--result-path PATH]`.
+Use `uv run --frozen --offline bash scan/scan_all.sh [--scan-path PATH ...] [--result-path PATH]`
+after provisioning the locked environment.
 Without CLI values, read JSON from `scan/analy.config`; the root template is
 copied there. `bash install/preflight.sh` checks binary availability only.
 

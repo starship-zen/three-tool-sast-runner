@@ -185,7 +185,7 @@ class ReliabilityTests(unittest.TestCase):
             import plistlib
             stdout.write_text("")
             stderr.write_text("")
-            if "-analyzer-output=plist" in command:
+            if "-analyzer-output=plist-html" in command:
                 with Path(command[command.index("-o") + 1]).open("wb") as stream:
                     plistlib.dump({"diagnostics": []}, stream)
             return {"exit_code": 0}

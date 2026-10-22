@@ -4,10 +4,12 @@
 
 Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, and **Clang Static Analyzer (CSA)** to produce standardized, auditable evidence packages for industrial control software and IEC 62443 compliance.
 
-> **Current status:** Scanner implementation; end-to-end acceptance incomplete.
-> The runner emits `scanner-evidence-1` with `downstream_compatible=false` and
-> `release_ready=false`. The `three-tool-input-1.0` exporter and business-product
-> isolation remain deferred. See [remaining acceptance work](scan/IMPLEMENTATION_STATUS.md).
+> **Current status:** The runner emits `scanner-evidence-1` with
+> `downstream_compatible=false` and `release_ready=false`, and can export a
+> separate product-scoped `three-tool-scan-delivery-1.0`. The report consumer
+> owns the adapter that binds its local mappings/assets and creates canonical
+> `three-tool-input-1.0`; neither delivery nor report candidate grants release
+> approval. See [remaining acceptance work](scan/IMPLEMENTATION_STATUS.md).
 
 [Example libraries](examples/README.md): pinned TinyXML2 (C++, build and scan) and
 GuardClauses (C#, build/run only; C# scanning is not implemented).
@@ -20,7 +22,7 @@ GuardClauses (C#, build/run only; C# scanning is not implemented).
 1. Discover target Translation Units (TUs) from CMake `compile_commands.json`.
 2. Run **Cppcheck (2.22+)**, **Clang-Tidy (LLVM 14+)**, and **Clang Static Analyzer (LLVM 14+)** on the exact same commit and compile database.
 3. Format outputs into a strictly layered, immutable evidence bundle (`[RAW]` diagnostics, `[RECEIPT]` execution receipts, `[CACHE]` states, and `[DERIVED]` summaries).
-4. Target the `three-tool-input-1.0` contract for downstream offline report generation (CWE Top 25:2025, OWASP Top 10:2025, and Critical/High/Medium/Low risk ratings). The current internal bundle is not yet a valid input to that consumer.
+4. Export a portable, product-scoped `three-tool-scan-delivery-1.0` containing unchanged native outputs and hash-bound scan/build/version receipts. The separate report consumer binds its own approved standards and mappings when preparing canonical input; the runner does not ship reporting policy.
 
 For the full architectural specification and interface contract, see [docs/SPEC.md](docs/SPEC.md) (English) or [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md) (中文).
 
@@ -77,16 +79,15 @@ three-tool-sast-runner/
 
 ## 5. Quickstart
 
-Run from the repository root on the intended Ubuntu 24.04 host. Use Python 3.10+
-and provision Cppcheck 2.22+ and LLVM 14+ separately. The bundled Cppcheck source
+Run from the repository root on the intended Ubuntu 24.04 host. Provision the
+locked Python 3.12.15 environment with `uv sync --frozen`; provision Cppcheck 2.22+
+and LLVM 14+ separately. The bundled Cppcheck source
 is a development snapshot, not the qualified version required by the evidence gate.
 Minimal Ubuntu images also need `python3-venv` for the virtual environment and
 `xz-utils` for the bundled source archive; source builds need their own toolchain.
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -r requirements.txt
+uv sync --frozen
 bash install/preflight.sh
 cp analy.config.example scan/analy.config
 ```
@@ -97,12 +98,16 @@ Relative paths are resolved against `scan/`, not the shell's working directory.
 Shell assignments and the old `SCAN_CODE_DIR` / `BUILD_DIR` keys are not supported.
 
 ```bash
-bash scan/scan_all.sh
+uv run --frozen bash scan/scan_all.sh
 # Equivalent CLI input; these paths are relative to the current directory:
-bash scan/scan_all.sh --scan-path /path/to/product/src --result-path /path/to/results
+uv run --frozen bash scan/scan_all.sh --scan-path /path/to/product/src --result-path /path/to/results
 # Temporary defect fixture only; it does not scan the supplied business source:
-bash scan/verify.sh --scan-path /path/to/product/src --result-path /path/to/smoke-results
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+uv run --frozen bash scan/verify.sh --scan-path /path/to/product/src --result-path /path/to/smoke-results
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen python -m unittest discover -s tests
+uv run --frozen python scan/handoff.py export \
+  --profile /path/to/product-profile.json \
+  --run /path/to/results/RUN_ID \
+  --output /path/to/new-product-delivery
 ```
 
 For each scan path, the runner searches its ancestors for `compile_commands.json`,
@@ -118,26 +123,35 @@ exit 1 is an execution/report failure, 2 an input error, 3 an evidence-gate
 failure after successful execution, and 130 cancellation. The synthetic smoke
 test has its own fixture result and does not certify a product or source baseline.
 
-## 6. Downstream Ingestion (Target Contract)
+## 6. Product-scoped delivery
 
-The consumer is the standalone `sast-report-pipeline`. The following is its target
-interface, not a working handoff from the current runner. Emit the root manifest
-specified in [SPEC section 7](docs/SPEC.md#7-downstream-ingestion-contract),
-including the v1.2 producer marker, local frozen assets and hash-bound receipts.
-Numbered directories alone are not accepted. Zero-warning clang-tidy may omit
-YAML only with the explicit validated summary receipt; do not fabricate YAML.
-```bash
-python3 scripts/three_tool_report.py generate \
-  --product <product_id> \
-  --manifest "<output_dir>/manifest.json" \
-  --output "<report_run_dir>" \
-  --mapping-mode strict
-```
+Copy and complete the operator-owned profile template at
+[`examples/runner-handoff/product-profile.example.json`](examples/runner-handoff/product-profile.example.json).
+The exporter requires one compile-database group and one explicitly declared
+component/target/configuration; every selected TU must fit the profile's
+repository-relative path and C/C++ language scope. It rejects failed evidence
+gates and multiple groups, and never infers business ownership from compile
+database labels.
 
-This produces a candidate, not customer release or IEC 62443 certification.
-CLI PDF requires a separately verified renderer; the web workbench has no PDF
-capability. Passing runner tests does not validate downstream ingestion or the
-reporting consumer's product, mapping and release gates.
+`scan/handoff.py export` writes a new, portable delivery with a hash-bound file
+inventory, unchanged native scanner bytes, source/build identity, typed
+execution receipts, actual tool release tokens, captured version banners and
+binary hashes, plus explicit artifact and zero-tidy counts. The original scan
+run and source checkout are not needed to verify the delivery after copying.
+The native outputs and raw provenance can contain absolute source/build paths
+and source excerpts; apply the product owner's data-handling policy before
+transfer. See [the delivery instructions](examples/runner-handoff/README.md)
+for the exact profile and command.
+
+The receiving `sast-report-pipeline` owns canonical `three-tool-input-1.0`
+preparation, frozen taxonomy assets, strict mapping audit, report generation,
+verification and packing. A delivery is not itself a canonical report input,
+vulnerability confirmation, release approval or IEC 62443 certification.
+
+CSA uses LLVM's native `plist-html` output: one analysis per TU produces both
+formats in a TU-isolated directory. Valid zero-diagnostic plist needs no HTML;
+findings require HTML. The native plist remains the reporting input, and the
+receipt records only the command that actually ran.
 
 ---
 

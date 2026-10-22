@@ -44,9 +44,12 @@ def run(paths, result_path, scanners):
     common.CANCELLED.clear()
     groups = common.plan(paths, source_fallback=True)
     binaries = {}
-    run_path = result_path / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12])
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
+    run_path = result_path / run_id
     run_path.mkdir(parents=True)
-    manifest = {"policy": {"version": "tool-owned-scan-1", "tools": {scanner.NAME: scanner.POLICY for scanner in scanners}},
+    manifest = {"runner_schema": "three-tool-sast-runner-execution-1.0", "run_id": run_id,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "policy": {"version": "tool-owned-scan-1", "tools": {scanner.NAME: scanner.POLICY for scanner in scanners}},
                 "scan_paths": list(map(str, paths)), "result_path": str(result_path), "run_path": str(run_path),
                 "tools": [scanner.NAME for scanner in scanners], "versions": {}, "groups": [], "ok": False}
     common.write_json(run_path / "manifest.json", manifest)
@@ -146,6 +149,7 @@ def complete_run(paths, result_path, scanners, groups, binaries, run_path, manif
     manifest["release_ready"] = False
     manifest["exit_code"] = (1 if not manifest["ok"] else 3 if manifest["evidence_gate_required"]
                              and not manifest["evidence_checks_ok"] else 0)
+    manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
     common.write_json(run_path / "manifest.json", manifest)
     run_index(manifest, run_path)
     print("结果目录: " + str(run_path))

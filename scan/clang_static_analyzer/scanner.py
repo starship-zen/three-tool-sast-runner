@@ -12,7 +12,7 @@ SUPPORTS_SOURCE = False
 REQUIRED_TOOLS = ("clang", "clang++")
 REPORT_PRIORITY = 0
 RELAX = ["-Wno-return-type-c-linkage", "-Wno-non-pod-varargs", "-Wno-invalid-constexpr"]
-POLICY = {"jobs": JOBS, "output": ["plist", "html"], "relax": RELAX, "source_fallback": False}
+POLICY = {"jobs": JOBS, "output": ["plist-html"], "relax": RELAX, "source_fallback": False}
 
 
 def resolve_tools():
@@ -131,31 +131,34 @@ def scan(entries, scopes, database, output, binaries):
 
     def run_one(entry):
         identity = common.unit_id(entry)
-        artifact = reports / (identity + ".plist")
+        html_dir = reports / identity
+        html_dir.mkdir()
+        artifact = html_dir / (identity + ".plist")
         compiler = binaries["clang"] if Path(entry["file"]).suffix == ".c" else binaries["clang++"]
         command = [compiler, "--analyze", *compiler_arguments(entry), *RELAX,
-                   "-Xanalyzer", "-analyzer-output=plist", "-o", str(artifact), entry["file"]]
+                   "-Xanalyzer", "-analyzer-output=plist-html", "-o", str(artifact), entry["file"]]
         receipt = common.execute(command, Path(entry["directory"]), logs / (identity + ".out.log"),
                                  logs / (identity + ".err.log"))
         receipt.update({"file": entry["file"], "unit_id": identity, "artifact": str(artifact),
                         "ok": receipt["exit_code"] == 0})
+        if not receipt["ok"]:
+            receipt["html_reports"] = []
+            receipt["artifact_error"] = "CSA analyzer exited with status " + str(receipt["exit_code"])
+            return receipt
         try:
             with artifact.open("rb") as stream:
-                diagnostics = plistlib.load(stream)["diagnostics"]
+                plist = plistlib.load(stream)
+            diagnostics = plist.get("diagnostics") if isinstance(plist, dict) else None
+            if not isinstance(diagnostics, list) or any(not isinstance(item, dict) for item in diagnostics):
+                raise ValueError("CSA Plist must contain a diagnostics array of dictionaries")
             receipt["diagnostics"] = len(diagnostics)
-            html_dir = reports / identity
-            html_dir.mkdir()
-            html_command = command.copy()
-            html_command[html_command.index("-analyzer-output=plist")] = "-analyzer-output=html"
-            html_command[html_command.index("-o") + 1] = str(html_dir)
-            html_receipt = common.execute(html_command, Path(entry["directory"]),
-                                          logs / (identity + ".html.out.log"), logs / (identity + ".html.err.log"))
-            receipt["html_execution"] = html_receipt
-            receipt["html_reports"] = [str(path) for path in sorted(html_dir.glob("*.html"))]
-            receipt["ok"] = receipt["ok"] and html_receipt["exit_code"] == 0
-            if diagnostics and not receipt["html_reports"]:
-                receipt.update({"ok": False, "artifact_error": "CSA diagnostics have no HTML report"})
-        except (OSError, ValueError, KeyError, TypeError, ExpatError) as error:
+            html_reports = sorted(html_dir.glob("*.html"))
+            if any(path.is_symlink() or not path.is_file() or path.stat().st_size == 0 for path in html_reports):
+                raise ValueError("CSA HTML report output is invalid")
+            receipt["html_reports"] = [str(path) for path in html_reports]
+            if diagnostics and not html_reports:
+                raise ValueError("CSA diagnostics have no HTML report")
+        except (OSError, plistlib.InvalidFileException, ValueError, KeyError, TypeError, ExpatError) as error:
             receipt.update({"ok": False, "artifact_error": str(error)})
         return receipt
 

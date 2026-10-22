@@ -21,7 +21,7 @@ Python 依赖和三个分析器。
 cmake -S examples/cpp -B examples/cpp/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build examples/cpp/build --parallel 2
 ctest --test-dir examples/cpp/build --output-on-failure
-bash scan/scan_all.sh --scan-path examples/cpp --result-path examples/results/cpp
+uv run --frozen --offline bash scan/scan_all.sh --scan-path examples/cpp --result-path examples/results/cpp
 ```
 
 编译数据库包含 `smoke.cpp` 与 `tinyxml2/tinyxml2.cpp` 两个编译单元，头文件随依赖闭包
@@ -52,7 +52,7 @@ dotnet examples/csharp/smoke/bin/Release/net8.0/Smoke.dll
 ## Source integrity and regression checks
 
 ```bash
-python3 -m unittest discover -s tests -p test_examples.py
+uv run --frozen --offline python -m unittest discover -s tests -p test_examples.py
 ```
 
 此检查验证所收源码与记录哈希相符，并确认 C# 输入不会被伪报为三工具扫描成功。
