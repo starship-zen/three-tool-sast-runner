@@ -55,12 +55,11 @@ def generate(output, result, group, entries, scopes, policy, binaries):
 
 def log_diagnostics(path, directory):
     diagnostics = Counter()
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = WARNING_RE.match(line)
-        if match:
-            location = str((directory / match.group("file")).resolve())
-            for check in match.group("check").split(","):
-                diagnostics[(location, int(match.group("line")), int(match.group("column")), check.strip())] += 1
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for match in WARNING_RE.finditer(text):
+        location = str((directory / match.group("file")).resolve())
+        for check in match.group("check").split(","):
+            diagnostics[(location, int(match.group("line")), int(match.group("column")), check.strip())] += 1
     return diagnostics
 
 

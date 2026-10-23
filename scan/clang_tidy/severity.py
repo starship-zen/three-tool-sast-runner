@@ -11,7 +11,9 @@ import collections
 from pathlib import Path
 
 WARNING_RE = re.compile(
-    r"^(?P<file>.+?):(?P<line>\d+):(?P<col>\d+):\s+warning:\s+(?P<msg>.*?)\s+\[(?P<check>[^\]]+)\]\s*$"
+    r"^(?P<file>[^\n]+?):(?P<line>\d+):(?P<col>\d+):\s+warning:\s+"
+    r"(?P<msg>.*?)(?:\n|\s)+\[(?P<check>[^\]]+)\]",
+    re.MULTILINE | re.DOTALL,
 )
 
 # severity: P0 = 内存/UB/崩溃, P1 = 逻辑/正确性, P2 = 性能
@@ -128,10 +130,8 @@ def collect(logs_dir: Path) -> dict[tuple[str, str, str, str], str]:
     for log_file in sorted(glob.glob(str(logs_dir / "*.log"))):
         if log_file.endswith((".out.log", ".err.log")):
             continue
-        for line in Path(log_file).read_text(encoding="utf-8", errors="replace").splitlines():
-            m = WARNING_RE.match(line.rstrip())
-            if not m:
-                continue
+        text = Path(log_file).read_text(encoding="utf-8", errors="replace")
+        for m in WARNING_RE.finditer(text):
             key = (m.group("file"), m.group("line"), m.group("col"), m.group("check"))
             unique.setdefault(key, m.group("msg"))
     return unique

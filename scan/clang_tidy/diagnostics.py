@@ -9,9 +9,9 @@ from pathlib import Path
 from collections import Counter, defaultdict
 
 WARNING_RE = re.compile(
-
-    r"^(?P<file>.+?):(?P<line>\d+):(?P<column>\d+):\s+warning:\s+.*?\s+\[(?P<check>[^\]]+)\]\s*$"
-
+    r"^(?P<file>[^\n]+?):(?P<line>\d+):(?P<column>\d+):\s+warning:\s+"
+    r"(?P<message>.*?)(?:\n|\s)+\[(?P<check>[^\]]+)\]",
+    re.MULTILINE | re.DOTALL,
 )
 
 def collect_diagnostics(log_dir: Path) -> dict[str, object]:
@@ -45,9 +45,8 @@ def collect_diagnostics(log_dir: Path) -> dict[str, object]:
     for log_file in sorted(path for path in log_dir.glob("*.log")
                            if not path.name.endswith((".out.log", ".err.log"))):
 
-        for line in log_file.read_text(encoding="utf-8", errors="replace").splitlines():
-
-            match = WARNING_RE.match(line)
+        text = log_file.read_text(encoding="utf-8", errors="replace")
+        for match in WARNING_RE.finditer(text):
 
             if not match:
 

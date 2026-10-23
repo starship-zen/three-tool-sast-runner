@@ -64,6 +64,16 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(child.read_text().split()[2], "Z")
         self.assertFalse(common.ACTIVE_PROCESSES)
 
+    def test_timeout_retries_three_times_and_preserves_attempt_logs(self):
+        code = "import time; time.sleep(60)"
+        receipt = self.execute(code, timeout=1)
+        self.assertEqual(receipt["exit_code"], 124)
+        self.assertTrue(receipt["timed_out"])
+        self.assertEqual(len(receipt["attempts"]), 4)
+        for attempt in receipt["attempts"]:
+            self.assertTrue(Path(attempt["stdout"]).exists())
+            self.assertTrue(Path(attempt["stderr"]).exists())
+
     def test_missing_executable_has_receipt(self):
         receipt = common.execute([str(self.folder / "missing")], self.folder,
                                  self.folder / "stdout", self.folder / "stderr")

@@ -150,35 +150,34 @@ class ScanTests(unittest.TestCase):
             planned.append(entries)
         self.assertEqual(planned[0], planned[1])
 
-    def test_conflicting_macro_contexts_fail_in_any_database_order(self):
+    def test_conflicting_macro_contexts_keep_first_record_in_any_database_order(self):
         first = {"directory": str(self.project), "file": "src/first.cpp",
                  "arguments": ["c++", "-DPRODUCT_A=1", "-c", "src/first.cpp", "-o", "first.o"]}
         second = {**first, "arguments": ["c++", "-DPRODUCT_A=2", "-c", "src/first.cpp", "-o", "first.o"]}
         for records in ([first, second], [second, first]):
             self.database.write_text(json.dumps(records))
-            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
-                common.plan([self.first])
+            entries = common.plan([self.first])[0][2]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["arguments"], records[0]["arguments"])
 
-    def test_conflicting_directories_fail_in_any_database_order(self):
+    def test_conflicting_directories_keep_first_record_in_any_database_order(self):
         arguments = ["c++", "-c", str(self.first), "-o", "first.o"]
         first = {"directory": str(self.project), "file": str(self.first), "arguments": arguments}
         second = {"directory": str(self.project / "build"), "file": str(self.first), "arguments": arguments}
         for records in ([first, second], [second, first]):
             self.database.write_text(json.dumps(records))
-            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
-                common.plan([self.first])
+            entries = common.plan([self.first])[0][2]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["directory"], str(Path(records[0]["directory"]).resolve()))
 
-    def test_conflicting_context_fails_before_run_creation_or_scanning(self):
+    def test_conflicting_context_is_deduplicated_before_scanning(self):
         first = {"directory": str(self.project), "file": "src/first.cpp",
                  "arguments": ["c++", "-DPRODUCT_A=1", "-c", "src/first.cpp", "-o", "first.o"]}
         second = {**first, "arguments": ["c++", "-DPRODUCT_A=2", "-c", "src/first.cpp", "-o", "first.o"]}
         self.database.write_text(json.dumps([first, second]))
-        output = self.folder / "must-not-be-created"
-        with patch.object(session, "complete_run") as complete_run:
-            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
-                session.run([self.first], output, SCANNERS)
-            complete_run.assert_not_called()
-        self.assertFalse(output.exists())
+        entries = common.plan([self.first])[0][2]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["arguments"], first["arguments"])
 
     def test_missing_database_does_not_fallback(self):
         self.database.unlink()
@@ -356,6 +355,18 @@ else:
             (logs / name).write_text(warning)
         warnings = collect_diagnostics(logs)
         self.assertEqual(warnings["raw_total"], 2)
+        self.assertEqual(warnings["unique_total"], 1)
+
+    def test_tidy_diagnostics_match_multiline_warning(self):
+        from clang_tidy.diagnostics import collect_diagnostics
+        logs = self.folder / "multiline-logs"
+        logs.mkdir()
+        (logs / "one.log").write_text(
+            "/project/header.hpp:12:3: warning: message starts here\n"
+            "  and continues on another line [bugprone-integer-division]\n"
+        )
+        warnings = collect_diagnostics(logs)
+        self.assertEqual(warnings["raw_total"], 1)
         self.assertEqual(warnings["unique_total"], 1)
 
     def test_main_without_database_keeps_cppcheck_but_marks_clang_unavailable(self):

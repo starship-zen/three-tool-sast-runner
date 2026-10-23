@@ -21,6 +21,8 @@ CONFIG = ROOT / "scan" / "analy.config"
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".m", ".mm"}
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
 PROCESS_TIMEOUT = 900
+# One initial attempt plus three automatic retries.
+TIMEOUT_ATTEMPTS = 4
 ACTIVE_PROCESSES = set()
 PROCESS_LOCK = threading.Lock()
 CANCELLED = threading.Event()
@@ -175,8 +177,9 @@ def plan(paths, source_fallback=False):
             selected_entry = {"directory": str(directory), "file": str(source), "arguments": arguments}
             previous = contexts.get(source)
             if previous is not None:
-                if previous["directory"] != selected_entry["directory"] or previous["arguments"] != arguments:
-                    raise ValueError("同一源码存在冲突的编译上下文: " + str(source))
+                # A source file can be compiled into several targets with target-
+                # specific defines. Keep the first database record so one TU is
+                # scanned once instead of failing or being multiplied per target.
                 continue
             contexts[source] = selected_entry
             selected.append(selected_entry)
@@ -209,40 +212,50 @@ def cancel_processes():
 @cancellation_signals()
 def execute(command, cwd, stdout, stderr, timeout=None, env=None):
     started = datetime.now(timezone.utc).isoformat()
-    timed_out = False
-    process = None
-    with stdout.open("w", encoding="utf-8") as out_stream, stderr.open("w", encoding="utf-8") as err_stream:
-        try:
-            with PROCESS_LOCK:
-                if CANCELLED.is_set():
-                    return {"command": command, "cwd": str(cwd), "exit_code": 130, "cancelled": True,
-                            "stdout": str(stdout), "stderr": str(stderr), "started": started,
-                            "finished": datetime.now(timezone.utc).isoformat()}
-                process = subprocess.Popen(command, cwd=cwd, env=environment() if env is None else env,
-                                           stdin=subprocess.DEVNULL, stdout=out_stream, stderr=err_stream,
-                                           start_new_session=True)
-                ACTIVE_PROCESSES.add(process)
+    attempts = []
+    limit = PROCESS_TIMEOUT if timeout is None else timeout
+    for number in range(1, TIMEOUT_ATTEMPTS + 1):
+        attempt_stdout = stdout if number == 1 else stdout.with_name(stdout.name + ".attempt-" + str(number))
+        attempt_stderr = stderr if number == 1 else stderr.with_name(stderr.name + ".attempt-" + str(number))
+        timed_out = False
+        process = None
+        with attempt_stdout.open("w", encoding="utf-8") as out_stream, attempt_stderr.open("w", encoding="utf-8") as err_stream:
             try:
-                code = process.wait(timeout=PROCESS_TIMEOUT if timeout is None else timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                stop_process(process)
-                code = 124
-                err_stream.write("\nProcess timeout; process group terminated.\n")
-            finally:
                 with PROCESS_LOCK:
-                    ACTIVE_PROCESSES.discard(process)
-        except KeyboardInterrupt:
-            cancel_processes()
-            if process is not None:
-                stop_process(process)
-            raise
-        except OSError as error:
-            err_stream.write(str(error))
-            code = 127
-    return {"command": command, "cwd": str(cwd), "exit_code": code, "timed_out": timed_out,
-            "cancelled": CANCELLED.is_set(), "started": started,
-            "finished": datetime.now(timezone.utc).isoformat(), "stdout": str(stdout), "stderr": str(stderr)}
+                    if CANCELLED.is_set():
+                        return {"command": command, "cwd": str(cwd), "exit_code": 130, "cancelled": True,
+                                "stdout": str(attempt_stdout), "stderr": str(attempt_stderr), "started": started,
+                                "finished": datetime.now(timezone.utc).isoformat(), "attempts": attempts}
+                    process = subprocess.Popen(command, cwd=cwd, env=environment() if env is None else env,
+                                               stdin=subprocess.DEVNULL, stdout=out_stream, stderr=err_stream,
+                                               start_new_session=True)
+                    ACTIVE_PROCESSES.add(process)
+                try:
+                    code = process.wait(timeout=limit)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    stop_process(process)
+                    code = 124
+                    err_stream.write("\nProcess timeout; process group terminated.\n")
+                finally:
+                    with PROCESS_LOCK:
+                        ACTIVE_PROCESSES.discard(process)
+            except KeyboardInterrupt:
+                cancel_processes()
+                if process is not None:
+                    stop_process(process)
+                raise
+            except OSError as error:
+                err_stream.write(str(error))
+                code = 127
+        attempts.append({"number": number, "exit_code": code, "timed_out": timed_out,
+                         "stdout": str(attempt_stdout), "stderr": str(attempt_stderr)})
+        if not timed_out or number == TIMEOUT_ATTEMPTS:
+            return {"command": command, "cwd": str(cwd), "exit_code": code, "timed_out": timed_out,
+                    "cancelled": CANCELLED.is_set(), "started": started,
+                    "finished": datetime.now(timezone.utc).isoformat(), "stdout": str(attempt_stdout),
+                    "stderr": str(attempt_stderr), "attempts": attempts,
+                    "timeout_recovered": any(item["timed_out"] for item in attempts[:-1]) and not timed_out}
 
 
 def unit_id(entry):
