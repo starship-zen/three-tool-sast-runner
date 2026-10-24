@@ -22,6 +22,8 @@ import common
 import evidence
 import session
 from clang_static_analyzer import scanner as csa
+from clang_tidy import scanner as tidy
+from clang_tidy import reporting as tidy_reporting
 from clang_tidy.severity import ownership
 from clang_tidy.dashboard import render_html
 from cpp_check import reporting as cppcheck_reporting
@@ -63,6 +65,218 @@ class ReliabilityTests(unittest.TestCase):
         if child.exists():
             self.assertEqual(child.read_text().split()[2], "Z")
         self.assertFalse(common.ACTIVE_PROCESSES)
+
+    def test_timeout_retries_three_times_and_preserves_attempt_logs(self):
+        code = "import time; time.sleep(60)"
+        receipt = self.execute(code, timeout=1)
+        self.assertEqual(receipt["exit_code"], 124)
+        self.assertTrue(receipt["timed_out"])
+        self.assertEqual(len(receipt["attempts"]), 4)
+        for attempt in receipt["attempts"]:
+            self.assertTrue(Path(attempt["stdout"]).exists())
+            self.assertTrue(Path(attempt["stderr"]).exists())
+
+    def test_timeout_then_success_keeps_canonical_final_bytes_and_attempt_history(self):
+        code = (
+            "from pathlib import Path; import sys,time; "
+            "counter=Path.cwd()/'attempt-count'; "
+            "number=int(counter.read_text())+1 if counter.exists() else 1; "
+            "counter.write_text(str(number)); "
+            "print(f'stdout attempt {number}', flush=True); "
+            "print(f'stderr attempt {number}', file=sys.stderr, flush=True); "
+            "time.sleep(60) if number == 1 else None"
+        )
+        with patch.object(common, "TIMEOUT_ATTEMPTS", 2):
+            receipt = self.execute(code, timeout=1)
+
+        self.assertEqual(receipt["exit_code"], 0)
+        self.assertFalse(receipt["timed_out"])
+        self.assertTrue(receipt["timeout_recovered"])
+        self.assertEqual(receipt["stdout"], str(self.folder / "stdout"))
+        self.assertEqual(receipt["stderr"], str(self.folder / "stderr"))
+        self.assertEqual(len(receipt["attempts"]), 2)
+        self.assertTrue(receipt["attempts"][0]["timed_out"])
+        self.assertFalse(receipt["attempts"][1]["timed_out"])
+        self.assertEqual((self.folder / "stdout").read_text(), "stdout attempt 2\n")
+        self.assertEqual((self.folder / "stderr").read_text(), "stderr attempt 2\n")
+        self.assertEqual(Path(receipt["attempts"][0]["stdout"]).read_text(), "stdout attempt 1\n")
+        first_stderr = Path(receipt["attempts"][0]["stderr"]).read_text()
+        self.assertTrue(first_stderr.startswith("stderr attempt 1\n"))
+        self.assertIn("Process timeout; process group terminated.", first_stderr)
+        self.assertEqual(Path(receipt["attempts"][1]["stdout"]).read_text(), "stdout attempt 2\n")
+        self.assertEqual(Path(receipt["attempts"][1]["stderr"]).read_text(), "stderr attempt 2\n")
+
+    def test_git_evidence_reads_canonical_bytes_after_a_retry(self):
+        fake_git = self.folder / "git"
+        fake_git.write_text("#!" + sys.executable + "\n" + '''
+import hashlib, sys, time
+from pathlib import Path
+arguments = sys.argv[3:]
+key = hashlib.sha256("\\0".join(arguments).encode()).hexdigest()[:12]
+counter = Path.cwd() / ("git-call-" + key)
+number = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(number))
+if number == 1:
+    print("partial git output", flush=True)
+    time.sleep(60)
+elif arguments == ["rev-parse", "--show-toplevel"]:
+    print(Path.cwd())
+elif arguments == ["rev-parse", "--abbrev-ref", "HEAD"]:
+    print("main")
+elif arguments == ["rev-parse", "HEAD"]:
+    print("a" * 40)
+''')
+        fake_git.chmod(0o755)
+        output = self.folder / "git-evidence"
+        output.mkdir()
+        original_execute = common.execute
+
+        def short_execute(command, cwd, stdout, stderr, timeout=None, env=None):
+            return original_execute(command, cwd, stdout, stderr, timeout=1, env=env)
+
+        with patch.dict(os.environ, {"PATH": str(self.folder) + os.pathsep + os.environ["PATH"]}), \
+                patch.object(common, "TIMEOUT_ATTEMPTS", 2), patch.object(common, "execute", side_effect=short_execute):
+            state = evidence.git_state(self.folder, output, "before")
+
+        self.assertTrue(state["ok"])
+        self.assertEqual(state["repo"], str(self.folder))
+        self.assertEqual(state["branch"], "main")
+        self.assertEqual(state["commit"], "a" * 40)
+        expected_output = {
+            ("rev-parse", "--show-toplevel"): str(self.folder),
+            ("rev-parse", "--abbrev-ref", "HEAD"): "main",
+            ("rev-parse", "HEAD"): "a" * 40,
+            ("status", "--porcelain"): "",
+            ("diff", "HEAD", "--binary"): "",
+        }
+        for receipt in state["receipts"].values():
+            self.assertEqual(Path(receipt["stdout"]).read_text().strip(),
+                             expected_output[tuple(receipt["command"][3:])])
+            self.assertEqual(len(receipt["attempts"]), 2)
+            self.assertTrue(receipt["attempts"][0]["timed_out"])
+            self.assertIn("partial git output", Path(receipt["attempts"][0]["stdout"]).read_text())
+
+    def test_cppcheck_timeout_retry_counts_final_native_xml(self):
+        tool = self.folder / "cppcheck-fixture"
+        tool.write_text("#!" + sys.executable + "\n" + '''
+import sys, time
+from pathlib import Path
+cache = Path(next(arg for arg in sys.argv if arg.startswith("--cppcheck-build-dir=")).split("=", 1)[1])
+counter = cache.parent / "cppcheck-attempt-count"
+number = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(number))
+if number == 1:
+    print("first attempt", flush=True)
+    sys.stderr.write("<results version=\\\"2\\\">")
+    sys.stderr.flush()
+    time.sleep(60)
+else:
+    print("final attempt", flush=True)
+    sys.stderr.write('<results version="2"><cppcheck version="2.22.0"/><errors>'
+                     '<error id="one"/><error id="two"/></errors></results>')
+''')
+        tool.chmod(0o755)
+        output = self.folder / "cppcheck-retry"
+        output.mkdir()
+        with patch.object(common, "TIMEOUT_ATTEMPTS", 2), patch.object(common, "PROCESS_TIMEOUT", 1):
+            receipt = cppcheck.scan_with_cache([self.entry], [self.folder], self.database, output,
+                                               {"cppcheck": str(tool)})
+
+        report = output / "cppcheck-compile-report.xml"
+        self.assertTrue(receipt["ok"], receipt.get("artifact_error"))
+        self.assertEqual(receipt["diagnostics"], 2)
+        self.assertEqual(receipt["stderr"], str(report))
+        self.assertEqual(len(receipt["attempts"]), 2)
+        self.assertTrue(Path(receipt["attempts"][0]["stderr"]).name.endswith(".err.log"))
+        self.assertNotEqual(Path(receipt["attempts"][0]["stderr"]).suffix, ".xml")
+        self.assertIn('<error id="one"/>', report.read_text())
+        self.assertIn("<results", Path(receipt["attempts"][0]["stderr"]).read_text())
+        captured = json.loads((output / "receipt.json").read_text())
+        self.assertEqual(captured["diagnostics"], 2)
+        self.assertEqual(captured["stderr"], str(report))
+        self.assertEqual(captured["attempts"], receipt["attempts"])
+
+    def test_tidy_retry_final_log_remains_bound_to_native_yaml_for_handoff(self):
+        tool = self.folder / "clang-tidy-fixture"
+        tool.write_text("#!" + sys.executable + "\n" + '''
+import sys, time
+from pathlib import Path
+artifact = Path(next(arg for arg in sys.argv if arg.startswith("--export-fixes=")).split("=", 1)[1])
+source = Path(sys.argv[-1])
+counter = Path(__file__).with_name(".tidy-invoke-count")
+number = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(number))
+if number == 1:
+    print(str(source) + ":1:5: warning: incomplete first attempt [bugprone-first-attempt]", file=sys.stderr, flush=True)
+    time.sleep(60)
+else:
+    print(str(source) + ":1:5: warning: final diagnostic [bugprone-example-check]", file=sys.stderr, flush=True)
+    artifact.write_text(
+        "MainSourceFile: " + str(source) + "\\n"
+        "Diagnostics:\\n"
+        "  - DiagnosticName: bugprone-example-check\\n"
+        "    Level: Warning\\n"
+        "    DiagnosticMessage:\\n"
+        "      Message: final diagnostic\\n"
+        "      FilePath: " + str(source) + "\\n"
+        "      FileOffset: 4\\n"
+        "    Notes: []\\n"
+        "    Replacements: []\\n")
+''')
+        tool.chmod(0o755)
+        output = self.folder / "clang-tidy-retry"
+        version = self.folder / "clang-tidy-version.txt"
+        version.write_text("Ubuntu LLVM version 18.1.3\n")
+        group = {"database": str(self.database), "selected_database": str(self.database),
+                 "tool_versions": {"clang-tidy": {"stdout": str(version)}}}
+        with patch.object(common, "TIMEOUT_ATTEMPTS", 2), patch.object(common, "PROCESS_TIMEOUT", 1):
+            result = tidy.scan([self.entry], [self.folder], self.database, output, {"clang-tidy": str(tool)})
+        item = result["files"][0]
+        final_warning = str(self.source) + ":1:5: warning: final diagnostic [bugprone-example-check]\n"
+        self.assertTrue(item["ok"])
+        self.assertTrue(item["timeout_recovered"])
+        self.assertTrue(Path(item["attempts"][0]["stderr"]).name.endswith(".err.log"))
+        self.assertEqual((output / "logs" / (item["unit_id"] + ".err.log")).read_text(), final_warning)
+        self.assertIn("incomplete first attempt", Path(item["attempts"][0]["stderr"]).read_text())
+
+        tidy.report(result, group, output, [self.entry], [self.folder], {"clang-tidy": str(tool)})
+        summary = json.loads((output / "clang-tidy-summary.json").read_text())
+        self.assertEqual(summary["files"][0]["stderr"], str(output / "logs" / (item["unit_id"] + ".err.log")))
+        self.assertEqual(summary["files"][0]["attempts"], item["attempts"])
+        self.assertEqual(summary["warnings"]["raw_total"], 1)
+        self.assertEqual(summary["warnings"]["unique_total"], 1)
+        self.assertEqual(summary["warnings"]["by_check"],
+                         [{"check": "bugprone-example-check", "raw": 1, "unique": 1}])
+        with (output / "severity.csv").open(newline="", encoding="utf-8") as stream:
+            severity_rows = list(csv.DictReader(stream))
+        self.assertEqual([row["check"] for row in severity_rows], ["bugprone-example-check"])
+        report_html = (output / "clang-tidy-report.html").read_text(encoding="utf-8")
+        self.assertNotIn("bugprone-first-attempt", report_html)
+        self.assertNotIn("incomplete first attempt", report_html)
+        evidence_root = self.folder / "runner-evidence"
+        evidence_root.mkdir()
+        validation = tidy.export_evidence(output, evidence_root, result)
+        self.assertEqual(validation["errors"], [])
+        copied = evidence_root / "04-clang-tidy/result"
+        fixed_handoff_log = copied / "logs" / (item["unit_id"] + ".err.log")
+        native_yaml = copied / "fixes" / (item["unit_id"] + ".yaml")
+        combined_log = copied / "logs" / (item["unit_id"] + ".log")
+        self.assertEqual(fixed_handoff_log.read_text(), final_warning)
+        self.assertEqual(tidy_reporting.log_diagnostics(combined_log, self.folder),
+                         tidy_reporting.yaml_diagnostics(native_yaml, self.folder, self.source))
+
+        no_retry_output = self.folder / "clang-tidy-no-retry"
+        no_retry_result = tidy.scan([self.entry], [self.folder], self.database, no_retry_output,
+                                    {"clang-tidy": str(tool)})
+        no_retry_item = no_retry_result["files"][0]
+        self.assertFalse(no_retry_item.get("timeout_recovered", False))
+        self.assertEqual(len(no_retry_item["attempts"]), 1)
+        tidy.report(no_retry_result, group, no_retry_output, [self.entry], [self.folder], {"clang-tidy": str(tool)})
+        no_retry_summary = json.loads((no_retry_output / "clang-tidy-summary.json").read_text())
+        self.assertEqual(no_retry_summary["warnings"]["raw_total"], 1)
+        self.assertEqual(no_retry_summary["warnings"]["unique_total"], 1)
+        self.assertEqual(no_retry_summary["warnings"]["by_check"],
+                         [{"check": "bugprone-example-check", "raw": 1, "unique": 1}])
 
     def test_missing_executable_has_receipt(self):
         receipt = common.execute([str(self.folder / "missing")], self.folder,

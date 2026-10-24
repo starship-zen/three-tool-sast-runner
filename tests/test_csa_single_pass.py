@@ -1,3 +1,4 @@
+import csv
 import plistlib
 import sys
 import tempfile
@@ -97,6 +98,36 @@ class CsaSinglePassTests(unittest.TestCase):
         for item in result["files"]:
             self.assertIn("reports/" + item["unit_id"] + "/report-" + item["unit_id"] + ".html", index)
             self.assertIn("reports/" + item["unit_id"] + "/" + item["unit_id"] + ".plist", index)
+
+    def test_exported_analyzer_log_excludes_retry_attempt_streams(self):
+        output = self.folder / "csa-retry-logs"
+        logs = output / "logs"
+        reports = output / "reports"
+        logs.mkdir(parents=True)
+        reports.mkdir()
+        source = self.sources[0]
+        unit_id = "retry-unit"
+        artifact = reports / (unit_id + ".plist")
+        self.write_plist(artifact, [])
+        (logs / (unit_id + ".out.log")).write_text("final stdout\n", encoding="utf-8")
+        (logs / (unit_id + ".err.log")).write_text("final stderr\n", encoding="utf-8")
+        (logs / (unit_id + ".attempt-1.out.log")).write_text("partial warning from first attempt\n", encoding="utf-8")
+        (logs / (unit_id + ".attempt-1.err.log")).write_text("partial error from first attempt\n", encoding="utf-8")
+        (output / "analyzer-summary.md").write_text("# Summary\n", encoding="utf-8")
+        common.write_json(output / "analyzer-status.json",
+                          {"total": 1, "analyzed": 1, "failed": [], "reports": 0, "elapsed_seconds": 1})
+        with (output / "tu-mapping.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("slug", "file", "diagnostics", "exit_code"))
+            writer.writerow((unit_id, str(source), 0, 0))
+        result = {"total": 1, "files": [{"file": str(source), "unit_id": unit_id,
+                                          "exit_code": 0, "diagnostics": 0, "artifact": str(artifact)}]}
+
+        target = self.folder / "retry-delivery"
+        reporting.export_evidence(output, target, result)
+
+        aggregate = target / "05-clang-static-analyzer/result/compile-db/analyzer.log"
+        self.assertEqual(aggregate.read_text(encoding="utf-8"), "final stderr\n\nfinal stdout\n")
 
     def test_positive_plist_without_html_fails_closed(self):
         def missing_html(command, artifact):

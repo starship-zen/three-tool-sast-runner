@@ -381,6 +381,18 @@ elif "--xml" in sys.argv:
         self.assertEqual(warnings["raw_total"], 2)
         self.assertEqual(warnings["unique_total"], 1)
 
+    def test_tidy_diagnostics_match_multiline_warning(self):
+        from clang_tidy.diagnostics import collect_diagnostics
+        logs = self.folder / "multiline-logs"
+        logs.mkdir()
+        (logs / "one.log").write_text(
+            "/project/header.hpp:12:3: warning: message starts here\n"
+            "  and continues on another line [bugprone-integer-division]\n"
+        )
+        warnings = collect_diagnostics(logs)
+        self.assertEqual(warnings["raw_total"], 1)
+        self.assertEqual(warnings["unique_total"], 1)
+
     def test_main_without_database_keeps_cppcheck_but_marks_clang_unavailable(self):
         self.database.unlink()
         output = self.folder / "fallback-results"

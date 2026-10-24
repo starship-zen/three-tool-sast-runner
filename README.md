@@ -86,8 +86,12 @@ three-tool-sast-runner/
 
 Run from the repository root on the intended Ubuntu 24.04 host. Provision the
 locked Python 3.12.15 environment with `uv sync --frozen`; provision Cppcheck 2.22+
-and LLVM 14+ separately. The bundled Cppcheck source
-is a development snapshot, not the qualified version required by the evidence gate.
+and LLVM 14+ separately. The bundled Cppcheck source archive is the official
+Cppcheck 2.22.0 release and is verified by its checked-in SHA-256 file.
+Commands launched through the shared execution wrapper, including analyzer,
+version, and Git evidence commands, are terminated and retried up to three
+times after their configured timeout. Each attempt keeps separate stdout/stderr
+evidence; the stable output paths contain the final attempt's bytes.
 Minimal Ubuntu images also need `python3-venv` for the virtual environment and
 `xz-utils` for the bundled source archive; source builds need their own toolchain.
 

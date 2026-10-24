@@ -85,7 +85,9 @@ three-tool-sast-runner/
 ## 5. 快速上手
 
 在目标 Ubuntu 24.04 主机上，从仓库根目录执行。先用 `uv sync --frozen` 准备锁定的 Python 3.12.15 环境，并另外准备
-Cppcheck 2.22+ 和 LLVM 14+。内置 Cppcheck 源码仍是开发快照，不满足证据门禁的版本要求。
+Cppcheck 2.22+ 和 LLVM 14+。内置源码归档已固定为官方 Cppcheck 2.22.0 正式版，并通过仓库内 SHA-256 文件校验。
+通过共享执行包装器启动的命令（包括分析器、版本探测和 Git 证据采集）超时后会先终止进程组，最多重试三次。
+每次尝试的 stdout/stderr 都单独保留；兼容固定路径始终保存最后一次尝试的字节。
 精简 Ubuntu 镜像还需 `python3-venv` 创建虚拟环境、`xz-utils` 解压内置源码；
 源码编译另需相应构建工具链。
 

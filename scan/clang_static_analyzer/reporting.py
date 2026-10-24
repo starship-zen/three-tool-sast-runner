@@ -45,7 +45,7 @@ def export_evidence(output, target, result):
     shutil.copytree(output / "reports", compilation / "reports")
     (compilation / "analyzer-files.log").write_text("\n".join(row["file"] for row in rows) + "\n", encoding="utf-8")
     (compilation / "analyzer.log").write_text("\n".join(path.read_text(encoding="utf-8", errors="replace")
-        for path in sorted((output / "logs").glob("*.log"))), encoding="utf-8")
+        for path in sorted((output / "logs").glob("*.log")) if ".attempt-" not in path.name), encoding="utf-8")
     status = json.loads((output / "analyzer-status.json").read_text())
     if not all(key in status for key in ("total", "analyzed", "failed", "reports", "elapsed_seconds")):
         errors.append("CSA status fields missing")

@@ -21,6 +21,8 @@ CONFIG = ROOT / "scan" / "analy.config"
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".m", ".mm"}
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
 PROCESS_TIMEOUT = 900
+# One initial attempt plus three automatic retries.
+TIMEOUT_ATTEMPTS = 4
 ACTIVE_PROCESSES = set()
 PROCESS_LOCK = threading.Lock()
 CANCELLED = threading.Event()
@@ -206,43 +208,68 @@ def cancel_processes():
             stop_process(process)
 
 
+def attempt_path(path, number, stream):
+    for stream_suffix in (".out.log", ".err.log"):
+        if path.name.endswith(stream_suffix):
+            stem = path.name[:-len(stream_suffix)]
+            return path.with_name(stem + ".attempt-" + str(number) + stream_suffix)
+    return path.with_name(path.name + ".attempt-" + str(number) + "." + stream + ".log")
+
+
 @cancellation_signals()
 def execute(command, cwd, stdout, stderr, timeout=None, env=None):
     started = datetime.now(timezone.utc).isoformat()
-    timed_out = False
-    process = None
-    with stdout.open("w", encoding="utf-8") as out_stream, stderr.open("w", encoding="utf-8") as err_stream:
-        try:
-            with PROCESS_LOCK:
-                if CANCELLED.is_set():
-                    return {"command": command, "cwd": str(cwd), "exit_code": 130, "cancelled": True,
-                            "stdout": str(stdout), "stderr": str(stderr), "started": started,
-                            "finished": datetime.now(timezone.utc).isoformat()}
-                process = subprocess.Popen(command, cwd=cwd, env=environment() if env is None else env,
-                                           stdin=subprocess.DEVNULL, stdout=out_stream, stderr=err_stream,
-                                           start_new_session=True)
-                ACTIVE_PROCESSES.add(process)
+    attempts = []
+    limit = PROCESS_TIMEOUT if timeout is None else timeout
+    for number in range(1, TIMEOUT_ATTEMPTS + 1):
+        attempt_stdout = attempt_path(stdout, number, "out")
+        attempt_stderr = attempt_path(stderr, number, "err")
+        timed_out = False
+        cancelled = False
+        process = None
+        with attempt_stdout.open("w", encoding="utf-8") as out_stream, attempt_stderr.open("w", encoding="utf-8") as err_stream:
             try:
-                code = process.wait(timeout=PROCESS_TIMEOUT if timeout is None else timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                stop_process(process)
-                code = 124
-                err_stream.write("\nProcess timeout; process group terminated.\n")
-            finally:
                 with PROCESS_LOCK:
-                    ACTIVE_PROCESSES.discard(process)
-        except KeyboardInterrupt:
-            cancel_processes()
-            if process is not None:
-                stop_process(process)
-            raise
-        except OSError as error:
-            err_stream.write(str(error))
-            code = 127
-    return {"command": command, "cwd": str(cwd), "exit_code": code, "timed_out": timed_out,
-            "cancelled": CANCELLED.is_set(), "started": started,
-            "finished": datetime.now(timezone.utc).isoformat(), "stdout": str(stdout), "stderr": str(stderr)}
+                    if CANCELLED.is_set():
+                        cancelled = True
+                        code = 130
+                    else:
+                        process = subprocess.Popen(command, cwd=cwd, env=environment() if env is None else env,
+                                                   stdin=subprocess.DEVNULL, stdout=out_stream, stderr=err_stream,
+                                                   start_new_session=True)
+                        ACTIVE_PROCESSES.add(process)
+                if process is not None:
+                    try:
+                        code = process.wait(timeout=limit)
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                        stop_process(process)
+                        code = 124
+                        err_stream.write("\nProcess timeout; process group terminated.\n")
+                    finally:
+                        with PROCESS_LOCK:
+                            ACTIVE_PROCESSES.discard(process)
+            except KeyboardInterrupt:
+                cancel_processes()
+                if process is not None:
+                    stop_process(process)
+                raise
+            except OSError as error:
+                err_stream.write(str(error))
+                code = 127
+        attempts.append({"number": number, "exit_code": code, "timed_out": timed_out,
+                         "stdout": str(attempt_stdout), "stderr": str(attempt_stderr)})
+        if cancelled or not timed_out or number == TIMEOUT_ATTEMPTS:
+            # Stable paths remain the compatibility interface for callers;
+            # the attempt paths retain each try, including the final one.
+            shutil.copyfile(attempt_stdout, stdout)
+            shutil.copyfile(attempt_stderr, stderr)
+            return {"command": command, "cwd": str(cwd), "exit_code": code, "timed_out": timed_out,
+                    "cancelled": cancelled or CANCELLED.is_set(), "started": started,
+                    "finished": datetime.now(timezone.utc).isoformat(), "stdout": str(stdout),
+                    "stderr": str(stderr), "attempts": attempts,
+                    "timeout_recovered": any(item["timed_out"] for item in attempts[:-1])
+                    and not timed_out and code == 0}
 
 
 def unit_id(entry):
