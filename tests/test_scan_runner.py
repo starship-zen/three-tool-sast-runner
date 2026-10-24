@@ -14,6 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scan"))
 import common
+import deliver
 import session
 from registry import SCANNERS
 from clang_tidy import scanner as tidy
@@ -298,6 +299,28 @@ else:
                        "group-1/cpp_check/summary.json", "group-1/cpp_check/selected-tus.csv",
                        "group-1/clang_static_analyzer/index.html", "group-1/clang_static_analyzer/analyzer-summary.md"):
             self.assertTrue((full_path / report).is_file(), report)
+
+    def test_run_directory_discovery_ignores_shared_cppcheck_cache_sibling(self):
+        tool = self.folder / "cppcheck-fixture"
+        tool.write_text("#!" + sys.executable + "\n" + '''import sys
+if "--version" in sys.argv:
+    print("Cppcheck 2.22.0")
+elif "--xml" in sys.argv:
+    print('<results version="2"><cppcheck version="2.22.0"/><errors/></results>', file=sys.stderr)
+''')
+        tool.chmod(0o755)
+        output = self.folder / "one-run"
+        output.mkdir()
+        with patch.object(common, "find_tool", return_value=str(tool)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(session.run([self.first.resolve()], output.resolve(), (cppcheck,)), 0)
+
+        # A complete three-tool run may also create this runner-owned cache beside its run directory.
+        (output / ".cache" / "cppcheck").mkdir(parents=True)
+        self.assertTrue((output / ".cache" / "cppcheck").is_dir())
+        run_path, manifest = deliver._run_directory(output)
+        self.assertIsNotNone(run_path)
+        self.assertEqual(manifest["runner_schema"], "three-tool-sast-runner-execution-1.0")
+        self.assertEqual(Path(manifest["run_path"]).resolve(), run_path.resolve())
 
     def test_tool_failure_is_reported_and_other_tools_continue(self):
         output = self.folder / "failed-results"

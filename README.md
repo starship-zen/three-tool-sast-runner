@@ -11,6 +11,9 @@ Automated C/C++ static analysis runner bundling **Cppcheck**, **Clang-Tidy**, an
 > `three-tool-input-1.0`; neither delivery nor report candidate grants release
 > approval. See [remaining acceptance work](scan/IMPLEMENTATION_STATUS.md).
 
+For the supported third-party scan-to-ZIP workflow, see the
+[operator handoff guide](docs/operator-guide.zh-CN.md).
+
 [Example libraries](examples/README.md): pinned TinyXML2 (C++, build and scan) and
 GuardClauses (C#, build/run only; C# scanning is not implemented).
 
@@ -34,6 +37,7 @@ For the full architectural specification and interface contract, see [docs/SPEC.
 three-tool-sast-runner/
 ├── README.md / README.zh-CN.md
 ├── docs/SPEC.md / SPEC.zh-CN.md
+├── docs/operator-guide.zh-CN.md
 ├── analy.config.example    # JSON template; copy to scan/analy.config
 ├── requirements.txt        # Python dependency for native YAML validation
 ├── install/
@@ -41,7 +45,8 @@ three-tool-sast-runner/
 │   ├── preflight.sh        # Binary availability check, not release certification
 │   └── cpp_check/          # Bundled source archive and installer
 ├── scan/
-│   ├── scan_all.sh         # Master runner
+│   ├── scan_all.sh         # Existing scan-only entry point
+│   ├── deliver.py          # Scan, export and checked ZIP entry point
 │   ├── verify.sh           # Real-analyzer smoke test on a temporary fixture
 │   ├── serve.sh            # Local report browsing
 │   ├── IMPLEMENTATION_STATUS.md

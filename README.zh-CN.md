@@ -10,6 +10,8 @@
 > 报告消费者负责绑定其本地映射资产并生成标准 `three-tool-input-1.0`；交付包不等于报告或发布批准。详见
 > [剩余验收工作](scan/IMPLEMENTATION_STATUS.md)。
 
+第三方从扫描到 ZIP 交付的操作步骤见[操作指南](docs/operator-guide.zh-CN.md)。
+
 [示例库与验证命令](examples/README.md)：固定版本的 TinyXML2（C++，构建及扫描）和
 GuardClauses（C#，仅构建/运行；尚未实现 C# 扫描）。
 
@@ -33,6 +35,7 @@ GuardClauses（C#，仅构建/运行；尚未实现 C# 扫描）。
 three-tool-sast-runner/
 ├── README.md / README.zh-CN.md
 ├── docs/SPEC.md / SPEC.zh-CN.md
+├── docs/operator-guide.zh-CN.md
 ├── analy.config.example    # JSON 模板，复制到 scan/analy.config
 ├── requirements.txt        # 原生 YAML 校验所需的 Python 依赖
 ├── install/
@@ -40,7 +43,8 @@ three-tool-sast-runner/
 │   ├── preflight.sh        # 二进制可用性检查，不是发布认证
 │   └── cpp_check/          # 源码归档和安装器
 ├── scan/
-│   ├── scan_all.sh         # 主执行入口
+│   ├── scan_all.sh         # 保留的仅扫描入口
+│   ├── deliver.py          # 扫描、导出并校验 ZIP 的一键入口
 │   ├── verify.sh           # 临时合成工程的真实分析器冒烟验证
 │   ├── serve.sh            # 本地报告浏览
 │   ├── IMPLEMENTATION_STATUS.md

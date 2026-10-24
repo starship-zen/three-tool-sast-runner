@@ -9,12 +9,16 @@ import sys
 import tempfile
 import unittest
 import uuid
+import warnings
+import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scan"))
 import common
+import deliver
 import handoff
 
 
@@ -591,6 +595,90 @@ class HandoffExportTests(unittest.TestCase):
         with self.assertRaisesRegex(handoff.HandoffError, "symlink"):
             handoff.export_run(self.profile_path, root, self.output)
         self.assertFalse(self.output.exists())
+
+    def test_checked_zip_has_formal_root_and_keeps_positive_findings_as_complete(self):
+        root = self.make_run(unit_count=2, positive_tidy_units=(0,), csa_findings=(0,))
+        handoff.export_run(self.profile_path, root, self.output)
+        archive_path = self.folder / "portable-delivery.zip"
+
+        packed = deliver.package_delivery(self.output, archive_path)
+
+        with zipfile.ZipFile(archive_path) as archive:
+            names = set(archive.namelist())
+            manifest_raw = archive.read("manifest.json")
+            manifest = json.loads(manifest_raw)
+            receipt = json.loads(archive.read("delivery-receipt.json"))
+        self.assertEqual(packed["manifest_at_root"], True)
+        self.assertIn("manifest.json", names)
+        self.assertIn("delivery-receipt.json", names)
+        self.assertFalse(any(name.startswith("bundle/") for name in names))
+        self.assertEqual(manifest["schema_version"], "three-tool-scan-delivery-1.0")
+        self.assertEqual(receipt["schema_version"], "three-tool-scan-delivery-receipt-1.0")
+        self.assertEqual(manifest["counts"]["scanner_reported_diagnostics"]["clang_tidy_log_summary_unique"], 1)
+        self.assertEqual(manifest["counts"]["scanner_reported_diagnostics"]["clang_static_analyzer_native_plists"], 1)
+        self.assertEqual(receipt["manifest"]["sha256"], _sha(manifest_raw))
+
+    def test_checked_zip_accepts_a_complete_zero_diagnostic_delivery(self):
+        root = self.make_run(unit_count=2, positive_tidy_units=(), csa_findings=())
+        handoff.export_run(self.profile_path, root, self.output)
+        archive_path = self.folder / "zero-delivery.zip"
+
+        deliver.package_delivery(self.output, archive_path)
+
+        with zipfile.ZipFile(archive_path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        counts = manifest["counts"]["scanner_reported_diagnostics"]
+        self.assertEqual(counts, {"cppcheck_native_xml": 0, "clang_tidy_log_summary_unique": 0,
+                                  "clang_static_analyzer_native_plists": 0})
+        self.assertEqual(manifest["counts"]["tidy_units_without_native_yaml"], 2)
+        self.assertFalse(any(item["tool"] == "clang-tidy" for item in manifest["artifacts"]))
+
+    def test_checked_zip_rejects_tampered_scope_and_unbound_files(self):
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=())
+        handoff.export_run(self.profile_path, root, self.output)
+        manifest_path = self.output / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["source"]["scope"]["included_paths"] = ["other/**"]
+        _write_json(manifest_path, manifest)
+        with self.assertRaisesRegex(deliver.DeliveryError, "differs from its receipt"):
+            deliver.package_delivery(self.output, self.folder / "tampered-scope.zip")
+
+        handoff.export_run(self.profile_path, root, self.folder / "clean-delivery")
+        (self.folder / "clean-delivery" / "extra.txt").write_text("unbound")
+        with self.assertRaisesRegex(deliver.DeliveryError, "outside its receipt closure"):
+            deliver.package_delivery(self.folder / "clean-delivery", self.folder / "unbound.zip")
+
+    def test_checked_zip_refuses_existing_destination_and_detects_archive_tampering(self):
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=())
+        handoff.export_run(self.profile_path, root, self.output)
+        archive_path = self.folder / "immutable.zip"
+        archive_path.write_bytes(b"keep-existing")
+        with self.assertRaisesRegex(deliver.DeliveryError, "already exists"):
+            deliver.package_delivery(self.output, archive_path)
+        self.assertEqual(archive_path.read_bytes(), b"keep-existing")
+
+        archive_path.unlink()
+        deliver.package_delivery(self.output, archive_path)
+        inventory = deliver._delivery_inventory(self.output)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Duplicate name:", category=UserWarning)
+            with zipfile.ZipFile(archive_path, "a") as archive:
+                archive.writestr("native/cppcheck.xml", b"tampered")
+        with self.assertRaisesRegex(deliver.DeliveryError, "exactly match"):
+            deliver._verify_zip(archive_path, inventory)
+
+    def test_zip_over_upload_limit_is_not_published_and_delivery_directory_is_preserved(self):
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=())
+        handoff.export_run(self.profile_path, root, self.output)
+        archive_path = self.folder / "oversize-delivery.zip"
+
+        with patch.object(deliver, "MAX_ARCHIVE_BYTES", 1):
+            with self.assertRaisesRegex(deliver.DeliveryError, "upload limit of 64 MiB"):
+                deliver.package_delivery(self.output, archive_path)
+
+        self.assertTrue(self.output.is_dir())
+        self.assertFalse(archive_path.exists())
+        self.assertFalse(list(self.folder.glob(".oversize-delivery.zip.*.tmp")))
 
     def test_regular_file_read_bound_is_enforced(self):
         path = self.folder / "bounded.txt"

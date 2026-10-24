@@ -276,6 +276,48 @@ def _validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return profile
 
 
+def validate_profile_scope(profile: dict[str, Any], repository_root: str | Path,
+                           selected: list[str]) -> dict[str, str]:
+    """Bind selected compile units to the declared product-relative scope."""
+    repo_root = Path(repository_root)
+    relative_units: dict[str, str] = {}
+    for unit in selected:
+        try:
+            relative = Path(unit).relative_to(repo_root).as_posix()
+        except ValueError as error:
+            raise HandoffError("a selected translation unit is outside the captured Git repository") from error
+        if not relative or ".." in Path(relative).parts:
+            raise HandoffError("selected source path cannot be represented relative to the captured Git root")
+        if not any(fnmatch.fnmatchcase(relative, pattern) for pattern in profile["included_paths"]):
+            raise HandoffError("selected source falls outside the explicit product-profile include scope: " + relative)
+        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in profile["excluded_paths"]):
+            raise HandoffError("selected source also matches an explicit product-profile exclusion: " + relative)
+        suffix = Path(relative).suffix.lower()
+        language = "C" if suffix == ".c" else "C++" if suffix in {".cc", ".cpp", ".cxx", ".c++"} else None
+        if language is None or language not in profile["languages"]:
+            raise HandoffError("selected source extension is outside the explicit C/C++ profile: " + relative)
+        relative_units[unit] = relative
+    return relative_units
+
+
+def stable_version_token(name: str, text: str) -> str:
+    if not text or PRERELEASE_RE.search(text):
+        raise HandoffError("missing, prerelease, or development tool version evidence for " + name)
+    if name == "cppcheck":
+        match = re.search(r"\bCppcheck\s+(\d+(?:\.\d+){1,3})\b", text, re.I)
+    else:
+        match = VERSION_RE.search(text)
+    if not match:
+        raise HandoffError("cannot parse a stable numeric release token for " + name)
+    token = match.group(1)
+    parts = tuple(int(part) for part in token.split("."))
+    minimum = (2, 22) if name == "cppcheck" else (14, 0)
+    width = max(len(parts), len(minimum))
+    if parts + (0,) * (width - len(parts)) < minimum + (0,) * (width - len(minimum)):
+        raise HandoffError("tool version is below the runner evidence gate for " + name)
+    return token
+
+
 def _version_record(run_root: Path, entry: Any, name: str) -> tuple[dict[str, Any], bytes, bytes, str, str]:
     if (not isinstance(entry, dict) or type(entry.get("exit_code")) is not int or entry["exit_code"] != 0
             or entry.get("cancelled") is not False or entry.get("timed_out") is not False):
@@ -291,20 +333,7 @@ def _version_record(run_root: Path, entry: Any, name: str) -> tuple[dict[str, An
     stdout = _read_file(stdout_path, name + " version stdout", MAX_VERSION_TEXT_BYTES)
     stderr = _read_file(stderr_path, name + " version stderr", MAX_VERSION_TEXT_BYTES)
     text = (stdout + b"\n" + stderr).decode("utf-8", errors="replace").strip()
-    if not text or PRERELEASE_RE.search(text):
-        raise HandoffError("missing, prerelease, or development tool version evidence for " + name)
-    if name == "cppcheck":
-        match = re.search(r"\bCppcheck\s+(\d+(?:\.\d+){1,3})\b", text, re.I)
-    else:
-        match = VERSION_RE.search(text)
-    if not match:
-        raise HandoffError("cannot parse a stable numeric release token for " + name)
-    token = match.group(1)
-    parts = tuple(int(part) for part in token.split("."))
-    minimum = (2, 22) if name == "cppcheck" else (14, 0)
-    width = max(len(parts), len(minimum))
-    if parts + (0,) * (width - len(parts)) < minimum + (0,) * (width - len(minimum)):
-        raise HandoffError("tool version is below the runner evidence gate for " + name)
+    token = stable_version_token(name, text)
     return entry, stdout, stderr, text, token
 
 
@@ -436,23 +465,7 @@ def _validate_run(run_root: Path, profile: dict[str, Any]) -> dict[str, Any]:
     if ".." in source_scope.parts:
         raise HandoffError("captured source root is outside the Git repository")
 
-    relative_units: dict[str, str] = {}
-    for unit in selected:
-        try:
-            relative = Path(unit).relative_to(Path(repo_root)).as_posix()
-        except ValueError as error:
-            raise HandoffError("a selected translation unit is outside the captured Git repository") from error
-        if not relative or ".." in Path(relative).parts:
-            raise HandoffError("selected source path cannot be represented relative to the captured Git root")
-        if not any(fnmatch.fnmatchcase(relative, pattern) for pattern in profile["included_paths"]):
-            raise HandoffError("selected source falls outside the explicit product-profile include scope: " + relative)
-        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in profile["excluded_paths"]):
-            raise HandoffError("selected source also matches an explicit product-profile exclusion: " + relative)
-        suffix = Path(relative).suffix.lower()
-        language = "C" if suffix == ".c" else "C++" if suffix in {".cc", ".cpp", ".cxx", ".c++"} else None
-        if language is None or language not in profile["languages"]:
-            raise HandoffError("selected source extension is outside the explicit C/C++ profile: " + relative)
-        relative_units[unit] = relative
+    relative_units = validate_profile_scope(profile, repo_root, selected)
     source_hashes = baseline.get("sources")
     if not isinstance(source_hashes, dict) or set(source_hashes) != set(selected):
         raise HandoffError("captured source-hash inventory does not exactly match selected units")
