@@ -21,5 +21,17 @@ for name in ("clang-tidy", "cppcheck", "clang", "clang++"):
     except ValueError as error:
         print("[MISS] " + str(error))
         failed = True
+
+try:
+    import yaml
+    version = getattr(yaml, "__version__", None)
+    if version == "6.0.3":
+        print("[OK] pyyaml: 6.0.3")
+    else:
+        print("[WARN] pyyaml: " + str(version) + " (推荐锁定版本 6.0.3)")
+except ImportError:
+    print("[MISS] pyyaml: 未安装 (运行收据校验必须，执行: uv pip install PyYAML==6.0.3)")
+    failed = True
+
 sys.exit(1 if failed else 0)
 PY

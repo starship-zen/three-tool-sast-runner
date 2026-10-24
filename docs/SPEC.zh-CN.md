@@ -245,6 +245,14 @@ clang-tidy 目标包含零告警单元时，使用以下显式支持证据条目
 
 首个通道仅支持一个组、组件、目标和配置。所有选中 TU 必须符合档案路径/语言范围；多组或失败门禁会被拒绝，不从编译数据库推断业务归属。绝对选中路径作为不透明分析单元 ID 保留，仓库相对范围另行绑定到 Git 基线。原始收据可能暴露主机路径，原生输出可能包含源码片段，转移前须按产品方数据策略处理。该交付是未经认证的扫描证据，不是发布批准。
 
+### 7.3 一键式交付与闭环自检（`scan/deliver.py`，2026-10-24）
+
+执行 `uv run --frozen --offline python scan/deliver.py --profile PROFILE --scan-path PATH --result-path RUN_ROOT --output OUTPUT.zip`，提供面向第三方的标准一键交付：
+1. **前置门禁**：核查 Git 工作区清洁度（`git status --porcelain` 为空）、提取 40 位真实 Git Commit、核实单编译数据库及 TU 范围、探测工具版本与 PyYAML 6.0.3 依赖；
+2. **扫描执行**：调用三工具，收集逐 TU 的原生日志与执行收据（Cppcheck XML/receipt、Clang-Tidy YAML/zero-receipt、CSA plist/status-receipt）；
+3. **闭环自检与校验打包（`_verify_zip`）**：自动回读生成的 ZIP 包，验证包内根目录平铺 `manifest.json` 与 `delivery-receipt.json`，比对全包每一个文件的 SHA-256 和字节大小；核验解压膨胀比（≤250:1）、单文件（≤128MB）、解压总量（≤256MB）、ZIP 大小（≤64MB）。全部通过方返回退出码 0 与 `status: delivered`；
+4. **第三方库隔离边界**：明确要求产品 profile 将未修改的第三方开源库（如 `tinyxml2`、`json.hpp`、`httplib.h` 等）置入 `excluded_paths`，防范密集宏与模板展开引起的行号对账差分。
+
 ## 8. 已实现的执行器安全契约（2026-10-22）
 
 ### 8.1 范围

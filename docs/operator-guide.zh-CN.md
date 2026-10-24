@@ -17,13 +17,21 @@ git clone "$APPROVED_RUNNER_REMOTE" "$RUNNER_REPO"
 cd "$RUNNER_REPO"
 git status --porcelain
 uv sync --frozen
-export PATH="<Cppcheck bin>:<LLVM bin>:$PATH"
+# 优先使用包含锁定的虚拟环境 Python，确保子进程调用 python3 时命中 PyYAML 6.0.3 依赖
+export PATH="$RUNNER_REPO/.venv/bin:<Cppcheck bin>:<LLVM bin>:$PATH"
 bash install/preflight.sh
+python3 -c "import yaml; assert getattr(yaml, '__version__', None) == '6.0.3', '必须是 PyYAML 6.0.3'"
 ```
 
-`git status --porcelain` 应为空。`uv sync --frozen` 使用锁文件；离线主机需事先具备对应 Python 与依赖缓存。`install/preflight.sh` 汇总检查 `cppcheck`、`clang-tidy`、`clang` 和 `clang++` 是否可找到；它不安装或认证这些二进制。新的一键命令还会在扫描前检查稳定版本与最低版本。Runner 通过 `PATH` 发现分析器，没有单工具环境变量覆盖；工具缺失或版本不符时先由主机管理员配置，不要绕过检查。
+`git status --porcelain` 应为空。`uv sync --frozen` 使用锁文件；离线主机需事先具备对应 Python 与依赖缓存（必须包含 `PyYAML==6.0.3`，Runner 逐文件收据验证依赖项）。`install/preflight.sh` 汇总检查 `cppcheck`、`clang-tidy`、`clang`、`clang++` 以及 `PyYAML` 是否可用；它不安装或认证这些二进制。新的一键命令还会在扫描前检查稳定版本与最低版本。Runner 通过 `PATH` 发现分析器，没有单工具环境变量覆盖；工具缺失或版本不符时先由主机管理员配置，不要绕过检查。
 
 ## 2. 一次性配置产品范围
+
+> [!caution] 【强制】自研业务代码与第三方开源库隔离原则（避免虚假 Error 与去重对账差分）
+> 本安全扫描与审计目标严格限定为**乙方交付的自研业务代码**。未修改的第三方通用开源库、公用单头文件库（如 `json.hpp`、`httplib.h`、`tinyxml2`、`spdlog`、`boost` 等）**严禁**直接作为自研源码单元送检。
+> - **业务危害**：通用开源库的宏与模板在极端分支下会触发虚假的工具原生 `error`（如 `missingReturn`、`danglingTemporaryLifetime`），无端增加合规审计与现场整改负担；
+> - **技术危害**：同一个宏或模板在多个源码单元中被包含展开时，Clang-Tidy 会在同一物理行号产生多重重复诊断，导致下游报告接收端在做严格对账校验时因行号与记录计数不一致而被直接打回（报错 `unique_diagnostics does not match native YAML`）；
+> - **必须动作**：在配置 `product-profile.json` 时，必须显式在 `excluded_paths` 中加入开源依赖目录及公用头文件（例如 `["build/**", "thirdparty/**", "external/**", "vendor/**", "**/json.hpp", "**/httplib.h"]`）。
 
 复制 [产品范围配置模板](../examples/runner-handoff/product-profile.example.json)，在 Runner checkout 之外保存一份产品方批准的 JSON。此 profile 是一次性输入，不是扫描结果 manifest。字段必须与模板一致：
 
@@ -119,6 +127,17 @@ uv run --frozen --offline python scan/deliver.py \
 
 **发给报告方的文件：**只发送成功 JSON 中 `zip_path` 指向的 ZIP，并用 `zip_sha256` 核对传输前后文件。不要发送源码、整个 run 目录、临时 profile、分析器安装目录或个人机器路径；报告方通过安全 ZIP 接收流程读取文件，不需要你解压或改 manifest。保留原始产品源码、fresh compile database 和 `$WORK/results/$RUN_ID` 直到报告方确认接收；后续复扫使用新的源码构建、结果目录和 ZIP。
 
+### 4.1 发送交付 ZIP 前的 30 秒自检核对表（4 项全部符合方可发送）
+
+扫描完成后，在向报告接收方发送 ZIP 文件前，操作员必须按表逐项核对。任一项不符合均不得交付：
+
+| 检查项 | 合格标志 | 不合格情况与处理 |
+| :--- | :--- | :--- |
+| **命令退出码** | 终端最后输出 `Exit: 0` | 退出码非 0（如退出码 2 或 3）严禁交付；查看错误 JSON，严禁手动改名交付半成品。 |
+| **状态标记** | 输出 JSON 中 `"status": "delivered"` 且 `"scan_status": "completed"` | 若为 `evidence_incomplete`，说明三工具证据门禁未通过，不可交付。 |
+| **包内根目录** | 查看生成的 ZIP 文件，根目录下**直接平铺** `manifest.json` 与 `delivery-receipt.json` | 严禁外层多包裹一层文件夹，严禁缺少 `delivery-receipt.json`。 |
+| **不可变 Commit 绑定** | 打开 `manifest.json`，确认 `commit` 字段为 40 位真实 Git Commit 哈希 | 若显示为 `Not recorded`，说明扫描前 Git 工作区不干净或未入库，必须 clean 后重新扫描。 |
+
 若扫描完成但 ZIP 超出当前接收端上限，命令会以 `stage: zip`、退出码 `4` 失败，并在错误 JSON 中给出完整的 `run_path` 与已导出的 `delivery_directory`；不会发布 ZIP。保留这两个目录，不要删减或拆分文件。只有 ZIP 本身超过 64 MiB，而单文件、成员数、展开总量等其余接收限制均满足时，才可由报告方受控接收人接收完整 delivery 目录，在报告仓库中运行 `sast_scan.py prepare-runner --delivery <delivery-directory> --product <product_id> --output-dir <new-input-dir>`，随后执行完整映射审计。目录接收仍受 128 MiB 单文件、1,000 个成员和 256 MiB 总量等限制；超出这些限制时停止，联系接收方确认受支持方案。这个目录路径只供报告方 CLI 接收；扫描方无需安装报告仓库，也不要自行用通用解压工具处理 ZIP。
 
 现有两步 CLI 仍可用于调试或接收方明确需要目录时：先运行 `scan/scan_all.sh`，再用 `scan/handoff.py export --profile ... --run ... --output <新目录>`。此路径导出标准交付目录；要生成推荐上传 ZIP，请使用上面的一键命令。
@@ -147,6 +166,8 @@ uv run --frozen --offline python scan/deliver.py \
 | 多个 compile-database group | 本次路径解析到多个构建数据库；按产品批准范围拆分扫描，每包只保留一个数据库组。 |
 | profile scope 不匹配 | 核对 Git 根相对路径模式、排除规则与 `languages`。只改产品方批准的 profile 后，用新结果路径重扫。 |
 | Git baseline dirty | 从干净 checkout 重建；不要通过忽略工作区变更或伪造 commit 来通过门禁。 |
+| PyYAML 缺失或退出码 `3` | 执行机环境未安装 `PyYAML==6.0.3`。确保执行 `uv sync --frozen`，并将 `$RUNNER_REPO/.venv/bin` 置于 `PATH` 最前端。 |
+| 下游报告端报 `unique_diagnostics does not match native YAML` | 扫描包含了宏/模板密集展开的第三方开源库（如 tinyxml2、nlohmann-json、cpp-httplib 等）。请在 profile 的 `excluded_paths` 中显式排除第三方库后重新导出。 |
 | ZIP 超过当前 64 MiB 上传上限或交付文件超过接收端限制 | 保留 run 与错误 JSON，联系报告方确认当前正式接收方案；不要自行拆包、删原生证据或改变接收限制。 |
 | 目录内有 C# / 其他不支持语言 | 将其列入 `unsupported_languages` 并明确报告覆盖缺口；本 Runner 没有 C# 分析器，C# 构建通过不等于 C# 安全扫描。 |
 

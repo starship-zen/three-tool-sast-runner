@@ -10,8 +10,13 @@
     "src/**"
   ],
   "excluded_paths": [
+    "build/**",
     "generated/**",
-    "thirdparty/**"
+    "thirdparty/**",
+    "external/**",
+    "vendor/**",
+    "**/json.hpp",
+    "**/httplib.h"
   ],
   "languages": [
     "C++"

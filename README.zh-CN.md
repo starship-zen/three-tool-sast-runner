@@ -93,6 +93,8 @@ Cppcheck 2.22+ 和 LLVM 14+。内置源码归档已固定为官方 Cppcheck 2.22
 
 ```bash
 uv sync --frozen
+# 优先使用虚拟环境 Python，确保子进程调用 python3 时包含 PyYAML 6.0.3
+export PATH="$PWD/.venv/bin:<Cppcheck bin>:<LLVM bin>:$PATH"
 bash install/preflight.sh
 cp analy.config.example scan/analy.config
 ```
@@ -101,9 +103,18 @@ cp analy.config.example scan/analy.config
 `result_path`（输出目录），替换模板占位路径。配置内相对路径以 `scan/` 为基准，
 不是当前 Shell 目录。不支持 Shell 赋值和旧 `SCAN_CODE_DIR` / `BUILD_DIR` 字段。
 
+**推荐：面向第三方的标准一键交付命令（自动运行扫描、收据采集与闭环自检 ZIP 打包）**：
 ```bash
-uv run --frozen bash scan/scan_all.sh
-# 等价的命令行输入；其中相对路径以当前目录为基准：
+uv run --frozen --offline python scan/deliver.py \
+  --profile /path/to/product-profile.json \
+  --scan-path /path/to/product/src \
+  --result-path /path/to/results/RUN_ID \
+  --output /path/to/deliveries/product-delivery.zip
+```
+详细执行步骤、第三方开源库隔离原则与交付前自检清单，请参阅完整的 **[《第三方操作指南：生成可移交的三工具扫描 ZIP》](docs/operator-guide.zh-CN.md)**。
+
+```bash
+# 旧版两步式命令行输入（用于本地单步调试）；其中相对路径以当前目录为基准：
 uv run --frozen bash scan/scan_all.sh --scan-path /path/to/product/src --result-path /path/to/results
 # 只扫描临时缺陷样例，不扫描所传业务源码：
 uv run --frozen bash scan/verify.sh --scan-path /path/to/product/src --result-path /path/to/smoke-results
