@@ -63,9 +63,12 @@ def export_evidence(output, target, result):
     raw = Path(result["stderr"])
     shutil.copy2(raw, report_folder / "cppcheck-compile-report.xml")
     errors = []
-    tree = element_tree.parse(raw)
-    if tree.getroot().tag != "results" or tree.getroot().get("version") != "2" or tree.find("errors") is None:
-        errors.append("Invalid Cppcheck XML v2")
+    try:
+        tree = element_tree.parse(raw)
+        if tree.getroot().tag != "results" or tree.getroot().get("version") != "2" or tree.find("errors") is None:
+            errors.append("Invalid Cppcheck XML v2")
+    except (element_tree.ParseError, SyntaxError) as error:
+        errors.append("Invalid Cppcheck XML v2 (parse error: " + str(error) + ")")
     if (output / "html").is_dir():
         shutil.copytree(output / "html", report_folder / "cppcheck-compile-html")
     artifacts = destination / "cppcheck-artifacts"

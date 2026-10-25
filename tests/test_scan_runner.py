@@ -151,35 +151,46 @@ class ScanTests(unittest.TestCase):
             planned.append(entries)
         self.assertEqual(planned[0], planned[1])
 
-    def test_conflicting_macro_contexts_fail_in_any_database_order(self):
+    def test_conflicting_macro_contexts_keep_first_record_in_any_database_order(self):
         first = {"directory": str(self.project), "file": "src/first.cpp",
                  "arguments": ["c++", "-DPRODUCT_A=1", "-c", "src/first.cpp", "-o", "first.o"]}
         second = {**first, "arguments": ["c++", "-DPRODUCT_A=2", "-c", "src/first.cpp", "-o", "first.o"]}
         for records in ([first, second], [second, first]):
             self.database.write_text(json.dumps(records))
-            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
-                common.plan([self.first])
+            entries = common.plan([self.first])[0][2]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["arguments"], records[0]["arguments"])
 
-    def test_conflicting_directories_fail_in_any_database_order(self):
+    def test_conflicting_directories_keep_first_record_in_any_database_order(self):
         arguments = ["c++", "-c", str(self.first), "-o", "first.o"]
         first = {"directory": str(self.project), "file": str(self.first), "arguments": arguments}
         second = {"directory": str(self.project / "build"), "file": str(self.first), "arguments": arguments}
         for records in ([first, second], [second, first]):
             self.database.write_text(json.dumps(records))
-            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
-                common.plan([self.first])
+            entries = common.plan([self.first])[0][2]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["directory"], str(Path(records[0]["directory"]).resolve()))
 
-    def test_conflicting_context_fails_before_run_creation_or_scanning(self):
+    def test_conflicting_context_is_deduplicated_before_scanning(self):
         first = {"directory": str(self.project), "file": "src/first.cpp",
                  "arguments": ["c++", "-DPRODUCT_A=1", "-c", "src/first.cpp", "-o", "first.o"]}
         second = {**first, "arguments": ["c++", "-DPRODUCT_A=2", "-c", "src/first.cpp", "-o", "first.o"]}
         self.database.write_text(json.dumps([first, second]))
-        output = self.folder / "must-not-be-created"
-        with patch.object(session, "complete_run") as complete_run:
-            with self.assertRaisesRegex(ValueError, "冲突的编译上下文"):
-                session.run([self.first], output, SCANNERS)
-            complete_run.assert_not_called()
-        self.assertFalse(output.exists())
+        entries = common.plan([self.first])[0][2]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["arguments"], first["arguments"])
+
+    def test_find_database_supports_build_variants(self):
+        self.database.unlink()
+        custom_build = self.project / "build_n4"
+        custom_build.mkdir()
+        custom_db = custom_build / "compile_commands.json"
+        custom_db.write_text(json.dumps([{"directory": str(self.project), "file": str(self.first),
+                                          "arguments": ["c++", "-c", str(self.first), "-o", "first.o"]}]))
+        found = common.find_database(self.first)
+        self.assertEqual(found, custom_db.resolve())
+        root = common.source_root([self.first], found)
+        self.assertEqual(root, self.project.resolve())
 
     def test_missing_database_does_not_fallback(self):
         self.database.unlink()
@@ -497,6 +508,23 @@ elif "--xml" in sys.argv:
                                        self.folder / "invalid-plist", {"clang": "clang", "clang++": "clang++"})
         self.assertFalse(receipt["ok"])
         self.assertIn("artifact_error", receipt["files"][0])
+
+    def test_cppcheck_truncated_xml_handled_gracefully(self):
+        from cpp_check.reporting import export_evidence
+        output = self.folder / "truncated-cppcheck-output"
+        output.mkdir()
+        (output / "selected-tus.csv").write_text("file,status\n/dummy/file.cpp,selected\n")
+        target = self.folder / "truncated-target"
+        target.mkdir()
+        meta = target / "01-metadata"
+        meta.mkdir()
+        (meta / "cppcheck.version.stdout.txt").write_text("Cppcheck 2.22.0\n")
+        stderr_file = output / "stderr.log"
+        stderr_file.write_text('<?xml version="1.0" encoding="UTF-8"?>\n<results version="2">\n<errors><error id="broken"')
+        result = {"exit_code": 124, "timed_out": True, "stderr": str(stderr_file), "command": ["cppcheck"]}
+        validation = export_evidence(output, target, result)
+        self.assertIn("errors", validation)
+        self.assertTrue(any("parse error" in err for err in validation["errors"]))
 
 
 if __name__ == "__main__":

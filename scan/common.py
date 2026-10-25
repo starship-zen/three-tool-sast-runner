@@ -127,6 +127,15 @@ def find_database(scope):
             candidate = folder / relative
             if candidate.is_file():
                 return candidate.resolve()
+        try:
+            for build_dir in sorted(folder.glob("build*")):
+                if build_dir.is_dir() and not build_dir.is_symlink():
+                    for relative in ("compile_commands.json", "Debug/compile_commands.json"):
+                        candidate = build_dir / relative
+                        if candidate.is_file():
+                            return candidate.resolve()
+        except OSError:
+            pass
     raise ValueError("未找到编译数据库（从扫描路径逐级向上查找）: " + str(scope))
 
 
@@ -177,8 +186,9 @@ def plan(paths, source_fallback=False):
             selected_entry = {"directory": str(directory), "file": str(source), "arguments": arguments}
             previous = contexts.get(source)
             if previous is not None:
-                if previous["directory"] != selected_entry["directory"] or previous["arguments"] != arguments:
-                    raise ValueError("同一源码存在冲突的编译上下文: " + str(source))
+                # A source file can be compiled into several targets with target-
+                # specific defines. Keep the first database record so one TU is
+                # scanned once instead of failing or being multiplied per target.
                 continue
             contexts[source] = selected_entry
             selected.append(selected_entry)
@@ -295,7 +305,7 @@ def source_root(scopes, database):
         folder = Path(database).parent
         if folder.name == "Debug":
             folder = folder.parent
-        if folder.name == "build":
+        if folder.name == "build" or folder.name.startswith("build_") or folder.name.startswith("build-"):
             folder = folder.parent
         return folder
     return Path(os.path.commonpath([str(path if path.is_dir() else path.parent) for path in scopes]))

@@ -141,7 +141,7 @@ def complete_run(paths, result_path, scanners, groups, binaries, run_path, manif
                 group["input_baseline_after"] = capture_inputs(
                     scanner, entries, group_path / "input-baseline" / "after", binaries)
             evidence.finish(group, group_path, scanners, manifest)
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except (OSError, ValueError, KeyError, TypeError, SyntaxError) as error:
             group["evidence_error"] = str(error)
             group["release_gate"] = {"ok": False, "errors": [str(error)]}
     manifest["ok"] = all(not group.get("report_error") and not group.get("evidence_error") and all(result["ok"] for result in group["results"].values())
@@ -170,7 +170,7 @@ def main(scanners, argv=None):
         common.cancel_processes()
         print("扫描已取消，子进程组已终止。", file=sys.stderr)
         return common.cancellation_exit_code(error)
-    except (OSError, ValueError, TypeError) as error:
+    except (OSError, ValueError, TypeError, SyntaxError) as error:
         print("error: " + str(error), file=sys.stderr)
         return 2
 

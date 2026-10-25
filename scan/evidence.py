@@ -166,7 +166,7 @@ def finish(group, folder, scanners, manifest):
             if set(checks[scanner.NAME]["files"]) != selected:
                 errors.append("TU identity mismatch: " + scanner.NAME)
             errors.extend(checks[scanner.NAME].get("errors", []))
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except (OSError, ValueError, KeyError, TypeError, SyntaxError) as error:
             errors.append(scanner.NAME + " export: " + str(error))
     required = {"cpp_check", "clang_tidy", "clang_static_analyzer"}
     if {scanner.NAME for scanner in scanners} != required:
