@@ -108,7 +108,7 @@ cmake --build "$SOURCE_ROOT/build" \
   --target "$APPROVED_TARGET" --parallel "$BUILD_JOBS"
 ```
 
-在干净 checkout 中使用新的 `build/` 生成数据库；扫描路径的祖先必须能找到 `build/compile_commands.json`。不要把旧构建目录的数据库当作当前配置，也不要手工编辑编译数据库。CMake 导出的数据库可能涵盖多个目标；Runner 按显式源码路径选择 TU，不按 CMake target 名过滤。构建负责人须确认本次数据库确实符合 profile 声明的单一组件/目标/配置；无法隔离时先由构建负责人提供合适的数据库，不要把所选 TU 清单解释成完整产品覆盖。同一 TU 出现互相冲突的参数时 Runner 会拒绝继续。
+在干净 checkout 中使用新的 `build/` 生成数据库；扫描路径的祖先必须能找到 `compile_commands.json`（支持位于根目录、`build/`、`build/Debug/` 或任意 `build*/` 变体目录如 `build_n4/`）。不要把旧构建目录的数据库当作当前配置，也不要手工编辑编译数据库。CMake 导出的数据库可能涵盖多个目标；Runner 按显式源码路径选择 TU，不按 CMake target 名过滤。CMake 多目标工程中同一源文件若存在多个编译条目（不同参数），Runner 会自动保留首个有效编译上下文（keep-first）平滑去重，确保每个编译单元被扫描一次，无需手动削减数据库条目。构建负责人须确认本次数据库确实符合 profile 声明的单一组件/目标/配置；无法隔离时先由构建负责人提供合适的数据库，不要把所选 TU 清单解释成完整产品覆盖。
 
 把产品 profile 放到 checkout 外。`included_paths` 和 `excluded_paths` 相对于 Git 根目录填写；它们约束实际选择的 TU。profile 中的 `target_id` 与 `configuration` 是产品方给定的身份说明，Runner 不会从编译数据库推断或证明业务目标归属。若构建数据库不能把组件/目标范围清楚隔离，先生成产品方认可的独立构建数据库，不要声称当前输出覆盖整个产品。
 
@@ -162,7 +162,7 @@ uv run --frozen --offline python scan/deliver.py \
 | 现象 | 处理 |
 | --- | --- |
 | `[MISS]` 或工具版本不支持 | 将经批准的 Cppcheck/LLVM 二进制目录加入 `PATH`，重新运行 `bash install/preflight.sh`；版本仍不符时由主机管理员升级，不能用旧版结果继续导出。 |
-| 找不到编译数据库或选中 `0` 个 TU | 重新生成当前源码/配置的 `compile_commands.json`；检查 `--scan-path` 是否在其目录或子目录，数据库是否位于根、`build/` 或 `build/Debug/`。 |
+| 找不到编译数据库或选中 `0` 个 TU | 重新生成当前源码/配置的 `compile_commands.json`；检查 `--scan-path` 是否在其目录或子目录，数据库是否位于根、`build/`、`build/Debug/` 或任意 `build*/` 目录（如 `build_n4/`）。 |
 | 多个 compile-database group | 本次路径解析到多个构建数据库；按产品批准范围拆分扫描，每包只保留一个数据库组。 |
 | profile scope 不匹配 | 核对 Git 根相对路径模式、排除规则与 `languages`。只改产品方批准的 profile 后，用新结果路径重扫。 |
 | Git baseline dirty | 从干净 checkout 重建；不要通过忽略工作区变更或伪造 commit 来通过门禁。 |

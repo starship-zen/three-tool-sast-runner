@@ -303,6 +303,15 @@ native outputs can contain source excerpts; operators must apply their data
 handling policy before transferring a delivery. The delivery remains
 untrusted scanner evidence, not authenticated execution or release approval.
 
+### 7.3 One-Step Delivery and Verified Packaging (`scan/deliver.py`, 2026-10-24)
+
+Execute `uv run --frozen --offline python scan/deliver.py --profile PROFILE --scan-path PATH --result-path RUN_ROOT --output OUTPUT.zip` for standard one-step delivery:
+1. **Preflight gate**: Verifies clean Git tree (`git status --porcelain` empty), extracts 40-char Git commit, verifies single compile database and TU scope, checks tool versions and PyYAML 6.0.3;
+2. **Scan execution**: Dispatches three tools, collects per-TU native logs and execution receipts (Cppcheck XML/receipt, Clang-Tidy YAML/zero-receipt, CSA plist/status-receipt);
+3. **Multi-target and build* compatibility**: Automatically deduplicates multi-target compile databases by keeping the first valid compile context per translation unit; automatically detects `build*` directories (such as `build_n4/`);
+4. **Verified packaging (`_verify_zip`)**: Automatically reopens and verifies the generated ZIP, ensuring root-level `manifest.json` and `delivery-receipt.json`, verifying SHA-256 and byte sizes of all members against the receipt closure; checks expansion limits (<=250:1), single member (<=128MB), expanded total (<=256MB), and archive size (<=64MB). Returns exit code 0 and `status: delivered` only when all checks pass;
+5. **Third-party library boundary**: Explicitly requires placing unmodified third-party open-source libraries into `excluded_paths` to prevent macro/template expansion discrepancies.
+
 ## 8. Implemented Runner Safety Contracts (2026-10-22)
 
 ### 8.1 Scope

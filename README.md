@@ -97,6 +97,8 @@ Minimal Ubuntu images also need `python3-venv` for the virtual environment and
 
 ```bash
 uv sync --frozen
+# Prioritize virtualenv Python to ensure subshells invoke python3 with PyYAML 6.0.3
+export PATH="$PWD/.venv/bin:<Cppcheck bin>:<LLVM bin>:$PATH"
 bash install/preflight.sh
 cp analy.config.example scan/analy.config
 ```
@@ -106,9 +108,18 @@ and `result_path` (output directory). Replace the template's placeholder paths.
 Relative paths are resolved against `scan/`, not the shell's working directory.
 Shell assignments and the old `SCAN_CODE_DIR` / `BUILD_DIR` keys are not supported.
 
+**Recommended: Standard one-step delivery command for third parties (automatic scan, receipt collection, and self-checked ZIP packaging)**:
 ```bash
-uv run --frozen bash scan/scan_all.sh
-# Equivalent CLI input; these paths are relative to the current directory:
+uv run --frozen --offline python scan/deliver.py \
+  --profile /path/to/product-profile.json \
+  --scan-path /path/to/product/src \
+  --result-path /path/to/results/RUN_ID \
+  --output /path/to/deliveries/product-delivery.zip
+```
+For complete execution instructions, third-party library exclusion rules, and the pre-delivery checklist, refer to **[Third-Party Operator Guide](docs/operator-guide.zh-CN.md)**.
+
+```bash
+# Legacy two-step CLI input (for local step-by-step debugging); relative paths resolve against current directory:
 uv run --frozen bash scan/scan_all.sh --scan-path /path/to/product/src --result-path /path/to/results
 # Temporary defect fixture only; it does not scan the supplied business source:
 uv run --frozen bash scan/verify.sh --scan-path /path/to/product/src --result-path /path/to/smoke-results
