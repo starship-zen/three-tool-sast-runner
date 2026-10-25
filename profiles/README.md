@@ -31,3 +31,9 @@ uv run --frozen --offline python scan/deliver.py \
   --result-path /path/to/results/run-tos_hub \
   --output /path/to/deliveries/tos_hub-delivery.zip
 ```
+
+## 配套交付标准操作规程 (SOP)
+
+完整的端到端操作步骤、环境自检与交付核对表已固化为受控规程文档：
+- **在线 Markdown 版**：[《智港通三工具静态代码扫描与标准化交付标准操作规程 (SOP)》](../docs/zhigangtong-delivery-sop.zh-CN.md)
+- **正式出版级 PDF 版**：[《智港通三工具静态代码扫描与标准化交付标准操作规程 (SOP).pdf》](../docs/zhigangtong-delivery-sop.pdf)

@@ -111,7 +111,8 @@ uv run --frozen --offline python scan/deliver.py \
   --result-path /path/to/results/RUN_ID \
   --output /path/to/deliveries/product-delivery.zip
 ```
-详细执行步骤、第三方开源库隔离原则与交付前自检清单，请参阅完整的 **[《第三方操作指南：生成可移交的三工具扫描 ZIP》](docs/operator-guide.zh-CN.md)**。
+详细执行步骤、第三方开源库隔离原则与交付前自检清单，请参阅完整的 **[《第三方操作指南：生成可移交的三工具扫描 ZIP》](docs/operator-guide.zh-CN.md)**。  
+智港通项目专属交付规程与预设配置，请参阅 **[《智港通交付标准操作规程 (SOP)》](docs/zhigangtong-delivery-sop.zh-CN.md)** 及 **[正式排版 PDF](docs/zhigangtong-delivery-sop.pdf)**。
 
 ```bash
 # 旧版两步式命令行输入（用于本地单步调试）；其中相对路径以当前目录为基准：

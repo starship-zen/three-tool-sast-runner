@@ -116,7 +116,8 @@ uv run --frozen --offline python scan/deliver.py \
   --result-path /path/to/results/RUN_ID \
   --output /path/to/deliveries/product-delivery.zip
 ```
-For complete execution instructions, third-party library exclusion rules, and the pre-delivery checklist, refer to **[Third-Party Operator Guide](docs/operator-guide.zh-CN.md)**.
+For complete execution instructions, third-party library exclusion rules, and the pre-delivery checklist, refer to **[Third-Party Operator Guide](docs/operator-guide.zh-CN.md)**.  
+For Zhigangtong project-specific execution procedures and preset profiles, refer to **[Zhigangtong Delivery SOP (Markdown)](docs/zhigangtong-delivery-sop.zh-CN.md)** and **[Formatted PDF Document](docs/zhigangtong-delivery-sop.pdf)**.
 
 ```bash
 # Legacy two-step CLI input (for local step-by-step debugging); relative paths resolve against current directory:
