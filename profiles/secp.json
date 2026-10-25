@@ -1,0 +1,20 @@
+{
+  "schema_version": "three-tool-product-profile-1.0",
+  "product_id": "secp",
+  "display_name": "secp",
+  "repository": "100901_secp_scan",
+  "component_id": "secp-core",
+  "target_id": "secp-core-target",
+  "configuration": "cmake-existing-build",
+  "included_paths": [
+    "src/**"
+  ],
+  "excluded_paths": [
+    "build/**",
+    "build_*/**"
+  ],
+  "languages": [
+    "C++"
+  ],
+  "unsupported_languages": []
+}

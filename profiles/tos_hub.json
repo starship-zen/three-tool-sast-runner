@@ -1,0 +1,21 @@
+{
+  "schema_version": "three-tool-product-profile-1.0",
+  "product_id": "tos_hub",
+  "display_name": "tos_hub",
+  "repository": "080400-tos-hub-v2",
+  "component_id": "tos_hub-core",
+  "target_id": "tos_hub-core-target",
+  "configuration": "cmake-existing-build",
+  "included_paths": [
+    "src/**",
+    "pubcode/**"
+  ],
+  "excluded_paths": [
+    "build/**",
+    "build_*/**"
+  ],
+  "languages": [
+    "C++"
+  ],
+  "unsupported_languages": []
+}
