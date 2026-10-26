@@ -116,7 +116,7 @@ uv run --frozen --offline python scan/deliver.py \
   --result-path /path/to/results/RUN_ID \
   --output /path/to/deliveries/product-delivery.zip
 ```
-For complete execution instructions, third-party library exclusion rules, and the pre-delivery checklist, refer to **[Third-Party Operator Guide](docs/operator-guide.zh-CN.md)**.  
+For complete execution instructions, third-party dependency scope and ownership guidance, and the pre-delivery checklist, refer to **[Third-Party Operator Guide](docs/operator-guide.zh-CN.md)**.
 For Zhigangtong project-specific execution procedures and preset profiles, refer to **[Zhigangtong Delivery SOP (Markdown)](docs/zhigangtong-delivery-sop.zh-CN.md)** and **[Formatted PDF Document](docs/zhigangtong-delivery-sop.pdf)**.
 
 ```bash
@@ -160,6 +160,21 @@ component/target/configuration; every selected TU must fit the profile's
 repository-relative path and C/C++ language scope. It rejects failed evidence
 gates and multiple groups, and never infers business ownership from compile
 database labels.
+
+An optional `path_ownership` profile array carries explicit literal
+repository-relative boundaries (`first-party`, `vendored`, or `system`) into
+`source.scope.path_ownership`. Included/excluded scan paths do not establish
+ownership. For primary native diagnostics on tracked files under the captured
+clean Git checkout, the exporter can add `source.source_path_identities` with
+the exact native path, repository-relative path and export-time file SHA-256.
+The receiver retains the existing displayed diagnostic label and uses that
+producer-supplied identity only to project a declared ownership boundary.
+Missing, outside-repository, untracked or unresolved files remain unclassified;
+the receiver never reads the producer's source tree or guesses by basename.
+The profile reserves the `diagnostic-files` prefix used for neutral diagnostic
+labels, so broad source boundaries cannot classify a header whose source
+identity is missing. For an existing delivery, the reporter's bound sidecar
+may instead name a complete exact neutral label when that label is evidenced.
 
 `scan/handoff.py export` writes a new, portable delivery with a hash-bound file
 inventory, unchanged native scanner bytes, source/build identity, typed

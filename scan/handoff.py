@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import copy
 import ctypes
 import errno
 import fnmatch
@@ -21,6 +22,7 @@ import plistlib
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -58,6 +60,7 @@ MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 MAX_FILES = 200_000
 MAX_UNITS = 100_000
+OWNERSHIP_CLASSES = {"first-party", "vendored", "system"}
 
 
 class HandoffError(ValueError):
@@ -70,6 +73,40 @@ def _sha256_bytes(raw: bytes) -> str:
 
 def _is_count(value: Any) -> bool:
     return type(value) is int and value >= 0
+
+
+def _validate_path_ownership(value: Any) -> list[dict[str, str]]:
+    """Validate explicit literal repository-relative ownership boundaries."""
+    if not isinstance(value, list):
+        raise HandoffError("product profile path_ownership must be an explicit array")
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict) or set(entry) != {"path", "ownership"}:
+            raise HandoffError(f"product profile path_ownership[{index}] must declare exactly path and ownership")
+        path = entry["path"]
+        ownership = entry["ownership"]
+        if (not isinstance(path, str) or not path or "\\" in path or "\x00" in path
+                or any(ord(char) < 32 for char in path)):
+            raise HandoffError(f"product profile path_ownership[{index}].path must be a safe literal relative path")
+        pure = PurePosixPath(path)
+        if (pure.is_absolute() or str(pure) != path
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or any(char in path for char in "*?[]")):
+            raise HandoffError(f"product profile path_ownership[{index}].path must be a literal relative prefix")
+        parts = path.split("/")
+        if parts[0] == "diagnostic-files":
+            raise HandoffError(
+                f"product profile path_ownership[{index}].path overlaps the reserved neutral diagnostic-label namespace; "
+                "declare repository-relative source ownership only",
+            )
+        if path in seen:
+            raise HandoffError("product profile path_ownership contains duplicate paths")
+        if not isinstance(ownership, str) or ownership not in OWNERSHIP_CLASSES:
+            raise HandoffError("product profile path_ownership ownership must be first-party, vendored or system")
+        seen.add(path)
+        result.append({"path": path, "ownership": ownership})
+    return result
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -239,7 +276,7 @@ def _validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "target_id", "configuration", "included_paths", "excluded_paths", "languages",
         "unsupported_languages",
     }
-    if set(profile) != required:
+    if frozenset(profile) not in {frozenset(required), frozenset(required | {"path_ownership"})}:
         raise HandoffError("product profile must contain exactly the documented delivery fields")
     if profile.get("schema_version") != PROFILE_SCHEMA:
         raise HandoffError("unsupported product profile schema")
@@ -273,6 +310,8 @@ def _validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
             raise HandoffError("product profile " + field + " contains duplicate values")
     if not profile["languages"] or any(item not in {"C", "C++"} for item in profile["languages"]):
         raise HandoffError("this delivery lane supports explicit C and/or C++ scope only")
+    if "path_ownership" in profile:
+        profile["path_ownership"] = _validate_path_ownership(profile["path_ownership"])
     return profile
 
 
@@ -803,6 +842,189 @@ def _validate_run(run_root: Path, profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _git_checkout_matches_commit(repository_root: Path, commit: str) -> bool:
+    """Return whether the export-time checkout still matches the captured clean baseline."""
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "--verify", "HEAD"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=30, check=False,
+        )
+        if head.returncode != 0 or head.stdout.strip() != commit:
+            return False
+        status = subprocess.run(
+            ["git", "-C", str(repository_root), "status", "--porcelain=v1", "--untracked-files=all"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=30, check=False,
+        )
+        return status.returncode == 0 and not status.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _git_path_is_tracked(repository_root: Path, relative_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository_root), "--literal-pathspecs", "ls-files",
+             "--error-unmatch", "--", relative_path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30, check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _selected_compile_directories(validated: dict[str, Any]) -> dict[str, Path]:
+    """Read the captured selected database for clang-tidy relative locations."""
+    try:
+        raw = _read_file(validated["selected_db"], "selected compilation database", MAX_JSON_BYTES)
+        entries = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_keys)
+    except (HandoffError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    if not isinstance(entries, list):
+        return {}
+    selected = set(validated["selected"])
+    result: dict[str, Path] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return {}
+        unit = entry.get("file")
+        directory = entry.get("directory")
+        if (not isinstance(unit, str) or unit not in selected or unit in result
+                or not isinstance(directory, str) or not Path(directory).is_absolute()):
+            return {}
+        result[unit] = Path(directory)
+    return result if set(result) == selected else {}
+
+
+def _primary_native_locations(validated: dict[str, Any]) -> list[tuple[str, Path | None]]:
+    """Collect native primary file strings and only their explicit resolution bases."""
+    locations: list[tuple[str, Path | None]] = []
+    try:
+        cpp_root = ET.fromstring(_read_file(validated["cpp_xml"], "Cppcheck native XML", MAX_NATIVE_BYTES))
+        for error in cpp_root.findall("./errors/error"):
+            primary = error.find("./location")
+            native_path = primary.get("file") if primary is not None else None
+            if isinstance(native_path, str) and native_path:
+                # Cppcheck's aggregate XML does not preserve a per-diagnostic
+                # working directory. Only absolute paths have a safe base.
+                locations.append((native_path, None))
+    except (HandoffError, ET.ParseError):
+        return locations
+
+    compile_directories = _selected_compile_directories(validated)
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        for unit, path in validated["tidy_yaml"].items():
+            base = compile_directories.get(unit)
+            if base is None:
+                continue
+            try:
+                document = yaml.safe_load(_read_file(path, "clang-tidy native YAML", MAX_NATIVE_BYTES))
+            except Exception:
+                continue
+            if not isinstance(document, dict) or not isinstance(document.get("Diagnostics"), list):
+                continue
+            main_file = document.get("MainSourceFile")
+            if not isinstance(main_file, str):
+                continue
+            main_path = Path(main_file)
+            if not main_path.is_absolute():
+                main_path = base / main_path
+            try:
+                if main_path.resolve(strict=True) != Path(unit).resolve(strict=True):
+                    continue
+            except OSError:
+                continue
+            for diagnostic in document["Diagnostics"]:
+                message = diagnostic.get("DiagnosticMessage") if isinstance(diagnostic, dict) else None
+                if not isinstance(message, dict):
+                    continue
+                native_path = message.get("FilePath")
+                if isinstance(native_path, str) and native_path:
+                    locations.append((native_path, base))
+
+    for unit, path in validated["csa_entries"].items():
+        try:
+            plist = plistlib.loads(_read_file(path, "CSA native plist", MAX_NATIVE_BYTES))
+        except (HandoffError, plistlib.InvalidFileException, ValueError, OverflowError):
+            continue
+        files = plist.get("files") if isinstance(plist, dict) else None
+        diagnostics = plist.get("diagnostics") if isinstance(plist, dict) else None
+        if not isinstance(files, list) or not isinstance(diagnostics, list):
+            continue
+        base = compile_directories.get(unit)
+        for diagnostic in diagnostics:
+            location = diagnostic.get("location") if isinstance(diagnostic, dict) else None
+            index = location.get("file") if isinstance(location, dict) else None
+            if type(index) is int and 0 <= index < len(files) and isinstance(files[index], str) and files[index]:
+                locations.append((files[index], base))
+    return locations
+
+
+def _source_path_identities(validated: dict[str, Any]) -> list[dict[str, str]]:
+    """Capture export-time hashes only for primary paths inside the matching clean Git tree."""
+    repository_root = Path(validated["repository_root"])
+    commit = validated["commit"]
+    if not _git_checkout_matches_commit(repository_root, commit):
+        return []
+    try:
+        root = repository_root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return []
+    identities: dict[str, dict[str, str]] = {}
+    by_relative_path: dict[str, str] = {}
+    resolved_hashes: dict[Path, tuple[str, str]] = {}
+    for native_path, base in _primary_native_locations(validated):
+        if ("\\" in native_path or "\x00" in native_path
+                or any(ord(char) < 32 for char in native_path)):
+            continue
+        raw_path = Path(native_path)
+        if raw_path.is_absolute():
+            candidate = raw_path
+        elif base is not None:
+            if any(part in {".", ".."} for part in PurePosixPath(native_path).parts):
+                continue
+            candidate = base / raw_path
+        else:
+            # No analyzer working directory is supplied for relative Cppcheck paths.
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            relative_path = resolved.relative_to(root).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if (not relative_path or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+                or not _git_path_is_tracked(root, relative_path)):
+            continue
+        cached = resolved_hashes.get(resolved)
+        if cached is None:
+            try:
+                digest, _ = _sha256_file(resolved, "diagnostic source file", MAX_FILE_BYTES)
+            except (HandoffError, OSError):
+                continue
+            cached = (relative_path, digest)
+            resolved_hashes[resolved] = cached
+        else:
+            relative_path, digest = cached
+        prior_digest = by_relative_path.get(relative_path)
+        if prior_digest is not None and prior_digest != digest:
+            raise HandoffError("source path identity content changed during export")
+        by_relative_path[relative_path] = digest
+        entry = {"native_path": native_path, "relative_path": relative_path, "sha256": digest}
+        prior = identities.get(native_path)
+        if prior is not None and prior != entry:
+            raise HandoffError("source path identity is contradictory")
+        identities[native_path] = entry
+    if not _git_checkout_matches_commit(repository_root, commit):
+        return []
+    return [identities[path] for path in sorted(identities)]
+
+
 def export_run(profile_path: str | Path, run_path: str | Path, output_path: str | Path) -> dict[str, Any]:
     run_root = _safe_existing_directory(run_path, "runner run")
     output = _safe_new_output(output_path)
@@ -1038,6 +1260,11 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
                 "unsupported_languages": list(profile_value["unsupported_languages"]),
             },
         }
+        if profile_value.get("path_ownership"):
+            source["scope"]["path_ownership"] = copy.deepcopy(profile_value["path_ownership"])
+        identities = _source_path_identities(validated)
+        if identities:
+            source["source_path_identities"] = identities
         component_record = {
             "component_id": component,
             "target_id": target_id,

@@ -27,11 +27,8 @@ python3 -c "import yaml; assert getattr(yaml, '__version__', None) == '6.0.3', '
 
 ## 2. 一次性配置产品范围
 
-> [!caution] 【强制】自研业务代码与第三方开源库隔离原则（避免虚假 Error 与去重对账差分）
-> 本安全扫描与审计目标严格限定为**乙方交付的自研业务代码**。未修改的第三方通用开源库、公用单头文件库（如 `json.hpp`、`httplib.h`、`tinyxml2`、`spdlog`、`boost` 等）**严禁**直接作为自研源码单元送检。
-> - **业务危害**：通用开源库的宏与模板在极端分支下会触发虚假的工具原生 `error`（如 `missingReturn`、`danglingTemporaryLifetime`），无端增加合规审计与现场整改负担；
-> - **技术危害**：同一个宏或模板在多个源码单元中被包含展开时，Clang-Tidy 会在同一物理行号产生多重重复诊断，导致下游报告接收端在做严格对账校验时因行号与记录计数不一致而被直接打回（报错 `unique_diagnostics does not match native YAML`）；
-> - **必须动作**：在配置 `product-profile.json` 时，必须显式在 `excluded_paths` 中加入开源依赖目录及公用头文件（例如 `["build/**", "thirdparty/**", "external/**", "vendor/**", "**/json.hpp", "**/httplib.h"]`）。
+> [!important] 扫描范围与代码归属分开声明
+> `included_paths`／`excluded_paths` 决定哪些翻译单元进入本次扫描，不决定告警文件属于自研、第三方还是系统代码。不要仅为降低计数而排除实际纳入交付范围的依赖；由产品负责人决定扫描范围，并可通过 `path_ownership` 明确声明经确认的字面路径边界。第三方发现仍保留在原始证据和最终风险汇总中。
 
 复制 [产品范围配置模板](../examples/runner-handoff/product-profile.example.json)，在 Runner checkout 之外保存一份产品方批准的 JSON。此 profile 是一次性输入，不是扫描结果 manifest。字段必须与模板一致：
 
@@ -43,8 +40,9 @@ python3 -c "import yaml; assert getattr(yaml, '__version__', None) == '6.0.3', '
 | `included_paths`、`excluded_paths` | 相对于 Git 仓库根目录的路径模式；选中的每个 TU 必须属于包含范围且不命中排除范围 |
 | `languages` | 本次交付中实际支持的 `C` 和/或 `C++` |
 | `unsupported_languages` | 产品内存在但本 Runner 不扫描的语言，例如 `C#` |
+| `path_ownership`（可选） | 产品负责人确认的字面 Git 根相对路径前缀及 `first-party`、`vendored` 或 `system` 归属；嵌套路径按最长前缀生效 |
 
-profile 不提供 Reporter 仓库路径、映射、风险规则或客户发布选项。不要为“凑齐字段”猜产品身份或路径。一个包只承载一个产品范围；多组件或目标归属不清时先由产品负责人拆分和确认。
+`included_paths`／`excluded_paths` 只定义本次扫描范围，不代表代码归属；Runner 不会从被扫描路径推断自研代码。未声明的归属保持未分类。`path_ownership` 只接受不含 glob 的安全 Git 根相对路径，不接受绝对路径、`..`、重复边界或保留的 `diagnostic-files` 前缀；该前缀用于接收端的中性诊断位置标签，宽前缀可能把没有源文件身份的告警误分。旧交付可由接收端用绑定到原 manifest、产品和 commit 的 sidecar 声明完整精确标签。profile 不提供 Reporter 仓库路径、映射、风险规则或客户发布选项。不要为“凑齐字段”猜产品身份或路径。一个包只承载一个产品范围；多组件或目标归属不清时先由产品负责人拆分和确认。
 
 **样例专用配置：**仓库内 TinyXML2 仅用于验证 Runner 命令，不代表真实产品。可将模板复制到 `$WORK/sample-profile.json`，仅在这份临时文件中填写 `product_id: "runner-sample"`、`display_name: "Runner sample only"`、`repository: "local-runner-sample"`、`component_id: "cpp-smoke"`、`target_id: "cpp-default"`、`configuration: "cmake-default"`，并把 `included_paths` 设为 `["examples/cpp/**"]`、`excluded_paths` 设为 `["examples/cpp/build/**"]`、`languages` 设为 `["C++"]`、`unsupported_languages` 设为空数组。所有值都明确属于本地样例，不能复制为生产配置。
 
@@ -167,7 +165,7 @@ uv run --frozen --offline python scan/deliver.py \
 | profile scope 不匹配 | 核对 Git 根相对路径模式、排除规则与 `languages`。只改产品方批准的 profile 后，用新结果路径重扫。 |
 | Git baseline dirty | 从干净 checkout 重建；不要通过忽略工作区变更或伪造 commit 来通过门禁。 |
 | PyYAML 缺失或退出码 `3` | 执行机环境未安装 `PyYAML==6.0.3`。确保执行 `uv sync --frozen`，并将 `$RUNNER_REPO/.venv/bin` 置于 `PATH` 最前端。 |
-| 下游报告端报 `unique_diagnostics does not match native YAML` | 扫描包含了宏/模板密集展开的第三方开源库（如 tinyxml2、nlohmann-json、cpp-httplib 等）。请在 profile 的 `excluded_paths` 中显式排除第三方库后重新导出。 |
+| 下游报告端报 `unique_diagnostics does not match native YAML` | 不要删除告警或排除已纳入交付范围的依赖来绕过计数差异。先让接收端依据精确工具版本、原始 YAML 与 primary-site/check 收据口径复核差异；若确认扫描收据或原始文件不完整，再按正式失败/补证流程处理。 |
 | ZIP 超过当前 64 MiB 上传上限或交付文件超过接收端限制 | 保留 run 与错误 JSON，联系报告方确认当前正式接收方案；不要自行拆包、删原生证据或改变接收限制。 |
 | 目录内有 C# / 其他不支持语言 | 将其列入 `unsupported_languages` 并明确报告覆盖缺口；本 Runner 没有 C# 分析器，C# 构建通过不等于 C# 安全扫描。 |
 

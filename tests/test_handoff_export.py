@@ -3,8 +3,10 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import plistlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -72,7 +74,7 @@ class HandoffExportTests(unittest.TestCase):
             "target_id": TARGET,
             "configuration": CONFIGURATION,
             "included_paths": list(include),
-            "excluded_paths": ["generated/**", "thirdparty/**"],
+            "excluded_paths": ["generated/**"],
             "languages": ["C++"],
             "unsupported_languages": [],
         }
@@ -80,20 +82,68 @@ class HandoffExportTests(unittest.TestCase):
         return profile
 
     def make_run(self, *, unit_count=2, positive_tidy_units=(0,), csa_findings=(0,),
-                 source_subdirectory="", profile_include=("src/**",)):
+                 source_subdirectory="", profile_include=("src/**",),
+                 repository_root: Path | None = None, diagnostic_header: str | None = None):
         self.make_profile(include=profile_include)
         root = self.folder / ("20261022T100000Z-" + uuid.uuid4().hex[:12])
         self.run_root = root
         group_dir = root / "group-1"
         evidence_root = group_dir / "evidence-bundle"
         evidence_root.mkdir(parents=True)
-        repo_root = "/synthetic/source-root"
+        repo_root = str(repository_root.resolve()) if repository_root is not None else "/synthetic/source-root"
         source_root = repo_root + ("/" + source_subdirectory if source_subdirectory else "")
         if source_subdirectory:
             source_files = ["smoke.cpp", "tinyxml2/tinyxml2.cpp"]
             units = [source_root + "/" + source_files[index] for index in range(unit_count)]
         else:
             units = [source_root + "/src/unit-" + str(index) + ".cpp" for index in range(unit_count)]
+        commit_value = COMMIT
+        if repository_root is not None:
+            repository_root.mkdir(parents=True, exist_ok=True)
+            initialized = subprocess.run(
+                ["git", "-C", str(repository_root), "init", "--quiet"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=30, check=False,
+            )
+            if initialized.returncode != 0:
+                raise AssertionError(initialized.stderr.decode("utf-8", "replace"))
+            for index, unit in enumerate(units):
+                source = Path(unit)
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("int fixture_" + str(index) + "() { return " + str(index) + "; }\n", encoding="utf-8")
+            if diagnostic_header is not None:
+                header_path = Path(repo_root) / diagnostic_header
+                header_path.parent.mkdir(parents=True, exist_ok=True)
+                header_path.write_bytes(b"// synthetic tracked diagnostic header\n")
+            added = subprocess.run(
+                ["git", "-C", str(repository_root), "add", "--all"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=30, check=False,
+            )
+            if added.returncode != 0:
+                raise AssertionError(added.stderr.decode("utf-8", "replace"))
+            git_env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Synthetic Test",
+                "GIT_AUTHOR_EMAIL": "synthetic@example.invalid",
+                "GIT_COMMITTER_NAME": "Synthetic Test",
+                "GIT_COMMITTER_EMAIL": "synthetic@example.invalid",
+            }
+            committed = subprocess.run(
+                ["git", "-C", str(repository_root), "commit", "--quiet", "-m", "synthetic runner fixture"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=30, check=False, env=git_env,
+            )
+            if committed.returncode != 0:
+                raise AssertionError(committed.stderr.decode("utf-8", "replace"))
+            identified = subprocess.run(
+                ["git", "-C", str(repository_root), "rev-parse", "--verify", "HEAD"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=30, check=False,
+            )
+            if identified.returncode != 0:
+                raise AssertionError(identified.stderr.decode("utf-8", "replace"))
+            commit_value = identified.stdout.decode("ascii").strip()
         slugs = {unit: hashlib.sha256(unit.encode()).hexdigest()[:20] for unit in units}
         source_hashes = {unit: hashlib.sha256(("source-" + str(index)).encode()).hexdigest()
                          for index, unit in enumerate(units)}
@@ -130,13 +180,22 @@ class HandoffExportTests(unittest.TestCase):
         _write_json(evidence_root / "01-metadata/scan-environment.json", {"synthetic": True})
         _write_json(evidence_root / "01-metadata/scanner-hashes.json", {"scan/runner.py": "c" * 64})
 
-        cpp_xml = b'<?xml version="1.0" encoding="UTF-8"?>\n<results version="2"><cppcheck version="2.22.0"/><errors/></results>\n'
+        cpp_error = ""
+        if diagnostic_header is not None:
+            native_header = str(Path(repo_root) / diagnostic_header)
+            cpp_error = (
+                '<error id="uninitvar" severity="warning" msg="synthetic header warning" cwe="457">'
+                '<location file="' + native_header + '" line="1" column="1"/></error>'
+            )
+        cpp_xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<results version="2">'
+                   '<cppcheck version="2.22.0"/><errors>' + cpp_error + '</errors></results>\n').encode()
+        cpp_diagnostics = 1 if diagnostic_header is not None else 0
         (evidence_root / "03-cppcheck/result/cppcheck-compile-report.xml").parent.mkdir(parents=True, exist_ok=True)
         (evidence_root / "03-cppcheck/result/cppcheck-compile-report.xml").write_bytes(cpp_xml)
         _write_json(evidence_root / "03-cppcheck/cppcheck-artifacts/receipt.json",
                     {"ok": True, "exit_code": 0, "mode": "compile", "selected_units": unit_count,
-                     "diagnostics": 0})
-        _write_json(evidence_root / "03-cppcheck/cppcheck-artifacts/summary.json", {"diagnostics": 0})
+                     "diagnostics": cpp_diagnostics})
+        _write_json(evidence_root / "03-cppcheck/cppcheck-artifacts/summary.json", {"diagnostics": cpp_diagnostics})
         with (evidence_root / "03-cppcheck/cppcheck-artifacts/input-files.csv").open("w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
             writer.writerow(("file",))
@@ -226,10 +285,11 @@ class HandoffExportTests(unittest.TestCase):
             "selected_database_sha256": selected_database_hash, "evidence_bundle": "group-1/evidence-bundle",
             "scan_paths": [source_root], "selected_files": units,
             "baseline": {"root": source_root,
-                         "git": {"repo": repo_root, "commit": COMMIT, "status": "", "diff": "", "ok": True},
+                         "git": {"repo": repo_root, "commit": commit_value, "status": "", "diff": "", "ok": True},
                          "sources": source_hashes, "captured_at": STAMP},
             "results": {
                 "cpp_check": {"ok": True, "mode": "compile", "selected_units": unit_count, "exit_code": 0,
+                              "diagnostics": cpp_diagnostics,
                               "started": STAMP, "finished": STAMP_END, "command": ["cppcheck", "--xml"]},
                 "clang_tidy": {"ok": True, "total": unit_count, "files": tidy_files},
                 "clang_static_analyzer": {"ok": True, "total": unit_count, "analyzed": unit_count,
@@ -249,7 +309,7 @@ class HandoffExportTests(unittest.TestCase):
             item["layer"] = __import__("evidence").artifact_layer(item["path"])
         evidence_manifest = {
             "schema": "scanner-evidence-1", "target_contract": "three-tool-input-1.0",
-            "downstream_compatible": False, "release_ready": False, "commit": COMMIT,
+            "downstream_compatible": False, "release_ready": False, "commit": commit_value,
             "selected_files": units, "release_gate": gate, "artifacts": evidence_artifacts,
         }
         _write_json(evidence_root / "manifest.json", evidence_manifest)
@@ -368,6 +428,154 @@ class HandoffExportTests(unittest.TestCase):
         _write_json(self.profile_path, profile)
         with self.assertRaisesRegex(handoff.HandoffError, "outside the explicit product-profile"):
             handoff.export_run(self.profile_path, root, self.output)
+
+    def test_explicit_profile_ownership_is_carried_without_inference(self):
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=())
+        profile = json.loads(self.profile_path.read_text())
+        declared = [
+            {"path": "src", "ownership": "first-party"},
+            {"path": "src/vendor", "ownership": "vendored"},
+        ]
+        profile["path_ownership"] = declared
+        _write_json(self.profile_path, profile)
+
+        handoff.export_run(self.profile_path, root, self.output)
+
+        manifest = json.loads((self.output / "manifest.json").read_text())
+        self.assertEqual(manifest["source"]["scope"]["path_ownership"], declared)
+        self.assertNotIn("source_path_identities", manifest["source"])
+
+    def test_path_ownership_profile_rejects_globs_traversal_and_duplicates(self):
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=())
+        base_profile = json.loads(self.profile_path.read_text())
+        for label, declarations, message in (
+            ("glob", [{"path": "vendor/**", "ownership": "vendored"}], "literal relative prefix"),
+            ("traversal", [{"path": "../vendor", "ownership": "vendored"}], "literal relative prefix"),
+            ("neutral-label-namespace", [
+                {"path": "diagnostic-files", "ownership": "vendored"},
+            ], "neutral diagnostic-label namespace"),
+            ("duplicate", [
+                {"path": "vendor", "ownership": "vendored"},
+                {"path": "vendor", "ownership": "system"},
+            ], "duplicate paths"),
+        ):
+            with self.subTest(case=label):
+                profile = {**base_profile, "path_ownership": declarations}
+                _write_json(self.profile_path, profile)
+                with self.assertRaisesRegex(handoff.HandoffError, message):
+                    handoff.export_run(self.profile_path, root, self.output)
+                self.assertFalse(self.output.exists())
+
+    def test_source_path_identity_requires_in_repo_file_and_matching_clean_commit(self):
+        repository = self.folder / "source-repository"
+        header = repository / "vendor" / "shared.hpp"
+        header.parent.mkdir(parents=True)
+        header.write_bytes(b"synthetic header bytes\n")
+        outside = self.folder / "outside.hpp"
+        outside.write_bytes(b"outside bytes\n")
+        validated = {"repository_root": str(repository), "commit": "a" * 40}
+        native_paths = [(str(header), None), (str(outside), None)]
+        with (
+            patch.object(handoff, "_git_checkout_matches_commit", return_value=True),
+            patch.object(handoff, "_git_path_is_tracked", return_value=True),
+            patch.object(handoff, "_primary_native_locations", return_value=native_paths),
+        ):
+            identities = handoff._source_path_identities(validated)
+        self.assertEqual(identities, [{
+            "native_path": str(header),
+            "relative_path": "vendor/shared.hpp",
+            "sha256": _sha(header.read_bytes()),
+        }])
+        with patch.object(handoff, "_git_checkout_matches_commit", return_value=False):
+            self.assertEqual(handoff._source_path_identities(validated), [])
+
+    def test_export_captures_primary_header_identity_from_clean_tracked_checkout(self):
+        repository = self.folder / "tracked-source"
+        header_relative = "vendor/shared.hpp"
+        root = self.make_run(
+            unit_count=1,
+            positive_tidy_units=(),
+            csa_findings=(),
+            profile_include=("src/**",),
+            repository_root=repository,
+            diagnostic_header=header_relative,
+        )
+
+        handoff.export_run(self.profile_path, root, self.output)
+
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        identities = manifest["source"].get("source_path_identities")
+        self.assertIsInstance(identities, list)
+        header = next(item for item in identities if item["relative_path"] == header_relative)
+        header_path = repository / header_relative
+        self.assertEqual(header["native_path"], str(header_path))
+        self.assertEqual(header["sha256"], _sha(header_path.read_bytes()))
+        self.assertEqual(manifest["source"]["commit"], subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=True,
+        ).stdout.decode("ascii").strip())
+
+    def test_git_tracking_lookup_handles_literal_glob_characters(self):
+        repository = self.folder / "git-tracked-paths"
+        repository.mkdir()
+        initialized = subprocess.run(
+            ["git", "-C", str(repository), "init", "--quiet"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False,
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr.decode("utf-8", "replace"))
+        ordinary = repository / "README.md"
+        literal_glob = repository / "vendor" / "[literal]*.hpp"
+        literal_glob.parent.mkdir()
+        ordinary.write_text("tracked\n", encoding="utf-8")
+        literal_glob.write_text("tracked literal filename\n", encoding="utf-8")
+        added = subprocess.run(
+            ["git", "-C", str(repository), "add", "--all"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False,
+        )
+        self.assertEqual(added.returncode, 0, added.stderr.decode("utf-8", "replace"))
+
+        self.assertTrue(handoff._git_path_is_tracked(repository, "README.md"))
+        self.assertTrue(handoff._git_path_is_tracked(repository, "vendor/[literal]*.hpp"))
+        self.assertFalse(handoff._git_path_is_tracked(repository, "vendor/literal-anything.hpp"))
+
+    def test_identity_baseline_requires_clean_tracked_and_untracked_worktree(self):
+        repository = self.folder / "clean-baseline"
+        repository.mkdir()
+        initialized = subprocess.run(
+            ["git", "-C", str(repository), "init", "--quiet"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False,
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr.decode("utf-8", "replace"))
+        (repository / "tracked.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repository), "add", "--all"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=True,
+        )
+        git_env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Synthetic Test",
+            "GIT_AUTHOR_EMAIL": "synthetic@example.invalid",
+            "GIT_COMMITTER_NAME": "Synthetic Test",
+            "GIT_COMMITTER_EMAIL": "synthetic@example.invalid",
+        }
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "--quiet", "-m", "clean baseline"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=True, env=git_env,
+        )
+        head = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=True,
+        ).stdout.decode("ascii").strip()
+        self.assertTrue(handoff._git_checkout_matches_commit(repository, head))
+        (repository / "untracked.hpp").write_text("// untracked\n", encoding="utf-8")
+        self.assertFalse(handoff._git_checkout_matches_commit(repository, head))
 
     def test_subdirectory_scan_root_exports_repo_relative_paths_and_preserves_raw_receipts(self):
         root = self.make_run(

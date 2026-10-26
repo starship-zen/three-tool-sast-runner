@@ -310,7 +310,7 @@ Execute `uv run --frozen --offline python scan/deliver.py --profile PROFILE --sc
 2. **Scan execution**: Dispatches three tools, collects per-TU native logs and execution receipts (Cppcheck XML/receipt, Clang-Tidy YAML/zero-receipt, CSA plist/status-receipt);
 3. **Multi-target and build* compatibility**: Automatically deduplicates multi-target compile databases by keeping the first valid compile context per translation unit; automatically detects `build*` directories (such as `build_n4/`);
 4. **Verified packaging (`_verify_zip`)**: Automatically reopens and verifies the generated ZIP, ensuring root-level `manifest.json` and `delivery-receipt.json`, verifying SHA-256 and byte sizes of all members against the receipt closure; checks expansion limits (<=250:1), single member (<=128MB), expanded total (<=256MB), and archive size (<=64MB). Returns exit code 0 and `status: delivered` only when all checks pass;
-5. **Third-party library boundary**: Explicitly requires placing unmodified third-party open-source libraries into `excluded_paths` to prevent macro/template expansion discrepancies.
+5. **Scope and ownership boundary**: `included_paths` and `excluded_paths` define scan scope, not source ownership. Product owners decide the approved scan scope; do not exclude an in-scope third-party dependency solely to reduce findings. Use literal `path_ownership` declarations for confirmed first-party, vendored, or system attribution, and leave undeclared ownership unknown.
 
 ## 8. Implemented Runner Safety Contracts (2026-10-22)
 

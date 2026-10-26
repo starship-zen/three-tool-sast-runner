@@ -378,9 +378,12 @@ else:
         self.assertFalse(manifest["evidence_checks_ok"])
 
     def test_project_specific_vendor_paths_are_not_universal_rules(self):
-        self.assertEqual(ownership("include/quanergy/component.h"), "project")
-        self.assertEqual(ownership("src/detector/perception/fastlioOdometry/fast-lio/module.h"), "project")
-        self.assertEqual(ownership("thirdparty/dependency.h"), "vendored")
+        self.assertEqual(ownership("include/quanergy/component.h"), "unclassified")
+        self.assertEqual(ownership("src/detector/perception/fastlioOdometry/fast-lio/module.h"), "unclassified")
+        self.assertEqual(ownership("thirdparty/dependency.h"), "unclassified")
+        self.assertEqual(ownership("/usr/include/stdio.h"), "unclassified")
+        self.assertEqual(ownership("/opt/product/lib/business.cpp"), "unclassified")
+        self.assertEqual(ownership("/usr/local/business/include/module.hpp"), "unclassified")
 
     def test_dashboard_uses_actual_version_and_directories(self):
         payload = {"files": [], "scan_dirs": ["custom"], "scan_paths": ["/project/custom"], "tool_version": "LLVM version 18.1.0",

@@ -9,17 +9,10 @@
   "included_paths": [
     "src/**"
   ],
-  "excluded_paths": [
-    "build/**",
-    "generated/**",
-    "thirdparty/**",
-    "external/**",
-    "vendor/**",
-    "**/json.hpp",
-    "**/httplib.h"
-  ],
+  "excluded_paths": [],
   "languages": [
     "C++"
   ],
-  "unsupported_languages": []
+  "unsupported_languages": [],
+  "path_ownership": []
 }

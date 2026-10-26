@@ -469,7 +469,8 @@ elif "--xml" in sys.argv:
             rows = list(csv.DictReader(stream))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["severity"], "P0")
-        self.assertEqual(rows[0]["ownership"], "project")
+        self.assertEqual(rows[0]["ownership"], "unclassified")
+        self.assertIn("第一方未声明", (output / "severity.md").read_text(encoding="utf-8"))
         self.assertTrue(rows[0]["remediation"])
 
     def test_tidy_dashboard_whole_root_counts(self):

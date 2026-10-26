@@ -239,11 +239,11 @@ clang-tidy 目标包含零告警单元时，使用以下显式支持证据条目
 
 ### 7.2 Runner 产品范围证据交付（2026-10-22）
 
-使用 `scan/handoff.py export --profile PROFILE --run RUN --output NEW_DIRECTORY`，将一个已完成且通过证据门禁的编译数据库组导出为 `three-tool-scan-delivery-1.0`。产品档案 `three-tool-product-profile-1.0` 只声明产品 ID/名称、仓库标识、组件、目标、配置、包含/排除路径和支持/不支持语言；不包含映射、标准资产或接收端路径。
+使用 `scan/handoff.py export --profile PROFILE --run RUN --output NEW_DIRECTORY`，将一个已完成且通过证据门禁的编译数据库组导出为 `three-tool-scan-delivery-1.0`。产品档案 `three-tool-product-profile-1.0` 声明产品 ID/名称、仓库标识、组件、目标、配置、包含/排除路径和支持/不支持语言；可选 `path_ownership` 只声明产品负责人确认的字面 Git 根相对路径边界（`first-party`、`vendored` 或 `system`），不含映射、标准资产或接收端路径。归属边界不得使用接收端中性标签保留前缀 `diagnostic-files`，否则缺少 source identity 的头文件告警可能被错误归类。已有交付若需归属，可由接收端提交绑定原 manifest、产品和 commit 的 sidecar，并声明已观察到的完整精确标签。
 
 交付根目录含 `manifest.json` 与 `delivery-receipt.json`。清单复用规范输入的 project/source/component/tool_run/artifact/provenance 字段形状，但不是 `three-tool-input-1.0`；文件使用相对路径并绑定大小和 SHA-256。它保留原样的原生字节、实际数值版本、完整版本横幅、二进制哈希、源码/构建/执行收据和计数。缺失 clang-tidy YAML 的单元有类型化引用指向原始 per-file 零结果收据；接收端须解析原生 YAML 并自行生成规范计数收据，不合成空 YAML。
 
-首个通道仅支持一个组、组件、目标和配置。所有选中 TU 必须符合档案路径/语言范围；多组或失败门禁会被拒绝，不从编译数据库推断业务归属。绝对选中路径作为不透明分析单元 ID 保留，仓库相对范围另行绑定到 Git 基线。原始收据可能暴露主机路径，原生输出可能包含源码片段，转移前须按产品方数据策略处理。该交付是未经认证的扫描证据，不是发布批准。
+首个通道仅支持一个组、组件、目标和配置。所有选中 TU 必须符合档案路径/语言范围；多组或失败门禁会被拒绝。包含/排除路径只代表本次扫描范围，不推断自研或第三方归属。绝对选中路径作为不透明分析单元 ID 保留，仓库相对范围另行绑定到 Git 基线。对于能在当前匹配的干净 Git commit 中解析、且受 Git 跟踪的 primary native diagnostic file，导出器可附 `source.source_path_identities`，逐项记录精确 native path、Git 根相对路径与导出时 SHA-256。该身份是导出时的 producer-supplied 声明，不认证工具是否实际读取了同一字节；checkout 不匹配、脏、文件缺失、仓库外或未跟踪时不生成身份，下游保留未知。不会按 basename 猜测，也不会改写原生诊断或其显示 label。原始收据可能暴露主机路径，原生输出可能包含源码片段，转移前须按产品方数据策略处理。该交付是未经认证的扫描证据，不是发布批准。
 
 ### 7.3 一键式交付与闭环自检（`scan/deliver.py`，2026-10-24）
 
@@ -251,7 +251,7 @@ clang-tidy 目标包含零告警单元时，使用以下显式支持证据条目
 1. **前置门禁**：核查 Git 工作区清洁度（`git status --porcelain` 为空）、提取 40 位真实 Git Commit、核实单编译数据库及 TU 范围、探测工具版本与 PyYAML 6.0.3 依赖；
 2. **扫描执行**：调用三工具，收集逐 TU 的原生日志与执行收据（Cppcheck XML/receipt、Clang-Tidy YAML/zero-receipt、CSA plist/status-receipt）；
 3. **闭环自检与校验打包（`_verify_zip`）**：自动回读生成的 ZIP 包，验证包内根目录平铺 `manifest.json` 与 `delivery-receipt.json`，比对全包每一个文件的 SHA-256 和字节大小；核验解压膨胀比（≤250:1）、单文件（≤128MB）、解压总量（≤256MB）、ZIP 大小（≤64MB）。全部通过方返回退出码 0 与 `status: delivered`；
-4. **第三方库隔离边界**：明确要求产品 profile 将未修改的第三方开源库（如 `tinyxml2`、`json.hpp`、`httplib.h` 等）置入 `excluded_paths`，防范密集宏与模板展开引起的行号对账差分。
+4. **范围与归属边界**：`included_paths`／`excluded_paths` 不代表代码归属；不要仅为降低计数而排除实际交付范围内的第三方依赖。由产品负责人决定扫描范围，可用字面 `path_ownership` 边界独立声明归属；未声明归属保持未知。
 
 ## 8. 已实现的执行器安全契约（2026-10-22）
 

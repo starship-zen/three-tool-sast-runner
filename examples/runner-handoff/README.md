@@ -10,9 +10,17 @@ reporter binds its own approved taxonomy assets after delivery.
 This first delivery lane accepts exactly one compile-database group, one
 explicit component, and one target/configuration per delivery. All selected
 translation units must fit the declared path/language scope. Multi-component
-compile databases and ambiguous ownership must be split or resolved by the
-product owner before exporting; the exporter does not infer business identity
-from the build database.
+compile databases must be split or resolved by the product owner before
+exporting; the exporter does not infer ownership from included paths or the
+build database. The optional profile `path_ownership` array declares literal
+Git-root-relative prefixes as `first-party`, `vendored`, or `system`; nested
+declarations use the most-specific prefix downstream. Omitted declarations
+remain unclassified.
+The producer profile reserves the `diagnostic-files` prefix used for neutral
+receiver labels. A broad boundary there could classify a header whose source
+identity is unavailable; do not use it for repository ownership. The receiver's
+offline supplement may name a complete observed label when attaching a legacy
+ownership declaration.
 
 Run scanning only after provisioning the approved analyzers and reviewing the
 runner configuration. A completed scan requires the three-tool evidence gate
@@ -35,6 +43,15 @@ banners, binary hashes, counts, and per-file SHA-256 receipts. It has no mapping
 or release-approval policy. Raw provenance and native diagnostics can include
 absolute source/build paths or source excerpts; apply the product owner's data
 handling policy before transferring the delivery to another machine.
+
+For primary native diagnostic paths that resolve to a tracked regular file
+inside the same clean captured Git commit, the exporter can add a
+`source_path_identities` entry with the exact native path, source-relative path,
+and export-time SHA-256. The reporter can use this producer-supplied identity to
+project an explicit source ownership boundary onto the existing diagnostic
+label without changing finding locations or IDs. Missing, outside, untracked
+or unresolved paths remain unclassified. This metadata does not prove which
+bytes the scanner consumed and does not authenticate execution.
 
 The command refuses an existing output path. The delivery is portable: its
 file references are relative and the receiver does not need the original scan

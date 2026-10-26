@@ -34,6 +34,7 @@ class DocumentedConfigTests(unittest.TestCase):
         template = json.loads((ROOT / "examples" / "runner-handoff" / "product-profile.example.json")
                               .read_text(encoding="utf-8"))
         handoff._validate_profile(template)
+        self.assertEqual(template["excluded_paths"], [])
 
         marker = 'cat > "$WORK/sample-profile.json" <<\'JSON\'\n'
         self.assertEqual(guide.count(marker), 1)

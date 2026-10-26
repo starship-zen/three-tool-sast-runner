@@ -103,19 +103,10 @@ SEV_LABEL = {
 }
 
 
-# In-repo third-party / vendored headers: not ours to fix. Governed by
-# header-filter exclusion, NOLINT-with-reason, or a dependency upgrade.
-VENDORED_PREFIXES = (
-    "thirdparty/",
-)
-
-
 def ownership(rel_path: str) -> str:
-    if rel_path.startswith(("/usr/", "/opt/", "/usr/local/")):
-        return "system"
-    if rel_path.startswith(VENDORED_PREFIXES):
-        return "vendored"
-    return "project"
+    # This standalone severity export has no product-approved ownership profile.
+    # Filesystem location alone is not evidence of system or first-party ownership.
+    return "unclassified"
 
 
 def normalize(project_root: Path, raw_path: str) -> str:
@@ -177,7 +168,7 @@ def generate(args):
             }
         )
     rows.sort(
-        key=lambda r: (r["ownership"] != "project", r["severity"], r["file"], int(r["line"]), int(r["column"]), r["check"])
+        key=lambda r: (r["ownership"] != "unclassified", r["severity"], r["file"], int(r["line"]), int(r["column"]), r["check"])
     )
 
     with open(args.output_csv, "w", newline="", encoding="utf-8") as fh:
@@ -198,12 +189,11 @@ def generate(args):
         writer.writeheader()
         writer.writerows(rows)
 
-    owned = [r for r in rows if r["ownership"] == "project"]
-    foreign = [r for r in rows if r["ownership"] != "project"]
-    by_sev = collections.Counter(r["severity"] for r in owned)
-    by_check = collections.Counter((r["severity"], r["check"]) for r in owned)
-    by_file = collections.Counter(r["file"] for r in owned)
-    by_sev_file = collections.Counter((r["severity"], r["file"]) for r in owned)
+    by_sev = collections.Counter(r["severity"] for r in rows)
+    by_check = collections.Counter((r["severity"], r["check"]) for r in rows)
+    by_file = collections.Counter(r["file"] for r in rows)
+    by_sev_file = collections.Counter((r["severity"], r["file"]) for r in rows)
+    ownership_counts = collections.Counter(r["ownership"] for r in rows)
 
     out = []
     out.append("# clang-tidy 基线 — 严重度分级与整改清单")
@@ -211,12 +201,11 @@ def generate(args):
     out.append(f"- 数据来源: `{result_dir}`")
     out.append(f"- 唯一缺陷站点(按 `文件:行:列 + 检查规则` 去重): **{len(rows)}**")
     out.append(
-        f"- 其中自有代码 **{len(owned)}**；第三方/vendored "
-        f"{sum(1 for r in foreign if r['ownership'] == 'vendored')}；系统头 "
-        f"{sum(1 for r in foreign if r['ownership'] == 'system')}"
+        "- 归属分类：第一方未声明（不可据此报告第一方零发现）；"
+        f"未分类 **{ownership_counts.get('unclassified', 0)}**；系统归属未声明"
     )
     out.append(f"- 明细清单: `{Path(args.output_csv).name}`")
-    out.append("- 整改数量只统计**自有代码**；第三方与系统头单列治理方式。")
+    out.append("- 严重度数量保留全部诊断；归属未确认不改变其计数或风险复核要求。")
     out.append("")
     out.append("## 严重度定义")
     out.append("")
@@ -228,7 +217,7 @@ def generate(args):
     out.append("")
 
     for sev in ("P0", "P1", "P2"):
-        group = [r for r in owned if r["severity"] == sev]
+        group = [r for r in rows if r["severity"] == sev]
         if not group:
             continue
         out.append(f"## {SEV_LABEL[sev]}（{len(group)} 条）")
@@ -250,29 +239,26 @@ def generate(args):
             out.append(f"- `{file_path}` — {count}")
         out.append("")
 
-    out.append("## 非自有代码（不计入整改数）")
+    out.append("## 代码归属（不改变诊断计数）")
     out.append("")
-    if foreign:
-        foreign_counts = collections.Counter(
-            (r["ownership"], r["check"], r["file"]) for r in foreign
+    if rows:
+        ownership_rows = collections.Counter(
+            (r["ownership"], r["check"], r["file"]) for r in rows
         )
         out.append("| 归属 | 检查规则 | 文件 | 数量 |")
         out.append("| --- | --- | --- | --- |")
-        for (owner, check, file_path), count in sorted(foreign_counts.items()):
+        for (owner, check, file_path), count in sorted(ownership_rows.items()):
             out.append(f"| {owner} | `{check}` | `{file_path}` | {count} |")
         out.append("")
-        out.append(
-            "治理方式: 用 `--header-filter` 排除,或在 vendored 头内加带原因的 "
-            "`// NOLINT(check-name)`；能升级依赖的优先升级。"
-        )
+        out.append("未分类路径须由产品方确认归属后再决定整改责任；本表不将其自动排除或认定为第三方代码。")
     else:
         out.append("无。")
     out.append("")
     out.append("## 建议推进批次")
     out.append("")
-    out.append("1. **批次 A（P0）** 先按检查规则聚合处理,`insecureAPI.strcpy` 单规则占 P0 一半,可一次收敛。")
-    out.append("2. **批次 B（P1 逻辑）** 按模块(`src/common`、`src/detector`、`src/tos`)分派,先 `DeadStores` 与 `integer-division`。")
-    out.append("3. **批次 C（P2 性能）** 用 `clang-tidy --fix` 批量处理 `可 --fix=是` 的规则,其余人工确认后关闭或 NOLINT。")
+    out.append("1. **优先复核 P0**：按诊断位置和规则确认影响与责任归属，再选择修复、依赖升级或经批准的保留方案。")
+    out.append("2. **处理 P1**：按确认后的组件归属和修复路径排序，不从目录名推断责任人。")
+    out.append("3. **安排 P2**：先核对可自动修复项；任何抑制都须有明确理由和评审记录。")
     out.append("")
     out.append("## 验收方式")
     out.append("")
@@ -282,7 +268,7 @@ def generate(args):
     out.append("  bash clang_tidy/scan.sh --jobs 8")
     out.append("```")
     out.append("")
-    out.append("- 目标: P0 归零,P1/P2 收敛到经评审的 NOLINT 白名单。")
+    out.append("- 目标: 所有 P0 获得处置结论，P1/P2 按责任归属和确认的处置计划闭环。")
     out.append("- 每条 NOLINT 必须写明原因,避免无理由抑制重新积累。")
     out.append("")
     out.append("## 各文件缺陷数 Top 20（全等级）")
