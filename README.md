@@ -109,6 +109,9 @@ Relative paths are resolved against `scan/`, not the shell's working directory.
 Shell assignments and the old `SCAN_CODE_DIR` / `BUILD_DIR` keys are not supported.
 
 **Recommended: Standard one-step delivery command for third parties (automatic scan, receipt collection, and self-checked ZIP packaging)**:
+
+> **Path note:** In an isolated Ubuntu 24.04 test with Cppcheck 2.22.0 and `LANG`/`LC_ALL=C.UTF-8`, 53/141 diagnostic records had CJK source paths emitted as `xxxxxx` (53/200 location elements), leaving 128/183 anchors available. The same source revision and profile under an ASCII-only checkout root with spaces had 181/183 anchors available. Use an ASCII-only absolute source checkout root for reliable coordinates; this is an observed limitation, not evidence that all Unicode paths fail.
+
 ```bash
 uv run --frozen --offline python scan/deliver.py \
   --profile /path/to/product-profile.json \
