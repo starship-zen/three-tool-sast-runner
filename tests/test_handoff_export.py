@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import unittest
 import uuid
 import warnings
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
@@ -83,7 +85,8 @@ class HandoffExportTests(unittest.TestCase):
 
     def make_run(self, *, unit_count=2, positive_tidy_units=(0,), csa_findings=(0,),
                  source_subdirectory="", profile_include=("src/**",),
-                 repository_root: Path | None = None, diagnostic_header: str | None = None):
+                 repository_root: Path | None = None, diagnostic_header: str | None = None,
+                 diagnostic_header_bytes: bytes | None = None):
         self.make_profile(include=profile_include)
         root = self.folder / ("20261022T100000Z-" + uuid.uuid4().hex[:12])
         self.run_root = root
@@ -114,7 +117,10 @@ class HandoffExportTests(unittest.TestCase):
             if diagnostic_header is not None:
                 header_path = Path(repo_root) / diagnostic_header
                 header_path.parent.mkdir(parents=True, exist_ok=True)
-                header_path.write_bytes(b"// synthetic tracked diagnostic header\n")
+                header_path.write_bytes(
+                    diagnostic_header_bytes if diagnostic_header_bytes is not None
+                    else b"// synthetic tracked diagnostic header\n"
+                )
             added = subprocess.run(
                 ["git", "-C", str(repository_root), "add", "--all"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -300,6 +306,36 @@ class HandoffExportTests(unittest.TestCase):
         }
         _write_json(root / "group-1/compile_commands.json", json.loads(selected_db_raw))
         common.write_json(evidence_root / "02-compile-db/compile_commands.json", json.loads(compile_db_raw))
+        if repository_root is not None:
+            input_files = list(units)
+            if diagnostic_header is not None:
+                input_files.append(str(Path(repo_root) / diagnostic_header))
+            dependency_files = {}
+            resolved_paths = {}
+            snapshots = {}
+            snapshot_root = evidence_root / "01-metadata/input-baseline/before"
+            for name in input_files:
+                source_path = Path(name)
+                raw_source = source_path.read_bytes()
+                digest = _sha(raw_source)
+                dependency_files[str(source_path)] = digest
+                resolved_paths[str(source_path)] = str(source_path.resolve())
+                relative_snapshot = "content/" + digest
+                snapshot_path = snapshot_root / relative_snapshot
+                snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_path.write_bytes(raw_source)
+                snapshots[digest] = relative_snapshot
+            before = {
+                "ok": True, "errors": [], "files": dependency_files,
+                "resolved_paths": resolved_paths, "environment": {}, "snapshots": snapshots,
+            }
+            after = {
+                "ok": True, "errors": [], "files": dependency_files,
+                "resolved_paths": resolved_paths, "environment": {}, "snapshots": {},
+            }
+            group["input_baseline"] = before
+            group["input_baseline_after"] = after
+            _write_json(snapshot_root / "baseline.json", before)
         evidence_artifacts = []
         for path in sorted(item for item in evidence_root.rglob("*") if item.is_file() and item.name != "manifest.json"):
             relative = path.relative_to(evidence_root).as_posix()
@@ -387,6 +423,263 @@ class HandoffExportTests(unittest.TestCase):
             copied = self.output / item["path"]
             self.assertEqual(copied.stat().st_size, item["size"])
             self.assertEqual(_sha(copied.read_bytes()), item["sha256"])
+
+    def test_diagnostic_anchor_sidecar_uses_pre_scan_snapshots_and_includes_headers(self):
+        repository = self.folder / "anchor-repository"
+        header_relative = "src/vendor/diagnostic.hpp"
+        root = self.make_run(unit_count=1, positive_tidy_units=(0,), csa_findings=(0,),
+                             repository_root=repository, diagnostic_header=header_relative)
+        handoff.export_run(self.profile_path, root, self.output)
+
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        reference = manifest["diagnostic_anchors"]
+        self.assertEqual(set(reference), {"path", "sha256"})
+        sidecar_path = self.output / reference["path"]
+        sidecar_raw = sidecar_path.read_bytes()
+        self.assertEqual(reference["sha256"], _sha(sidecar_raw))
+        self.assertNotIn(b"synthetic tracked diagnostic header", sidecar_raw)
+        sidecar = json.loads(sidecar_raw)
+        self.assertEqual(sidecar["schema_version"], "diagnostic-anchors-1.0")
+        self.assertEqual(sidecar["product_id"], manifest["project"]["product_id"])
+        self.assertEqual(sidecar["source"], {"repository": manifest["source"]["repository"],
+                                              "commit": manifest["source"]["commit"]})
+        self.assertEqual(len(sidecar["entries"]), 3)
+        self.assertTrue(all(item["anchor"]["status"] == "available" for item in sidecar["entries"]))
+
+        by_locator = {item["locator"]: item for item in sidecar["entries"]}
+        cpp = by_locator["errors.error[0]"]
+        header_path = repository / header_relative
+        self.assertEqual(cpp["primary_location"], {
+            "file": str(header_path), "line": 1, "column": 1, "offset": None,
+        })
+        self.assertEqual(cpp["anchor"]["repository_path"], header_relative)
+        header_bytes = header_path.read_bytes()
+        self.assertEqual(cpp["anchor"]["file_sha256"], _sha(header_bytes))
+        expected_context = _sha(len(header_bytes).to_bytes(8, "big") + header_bytes)
+        self.assertEqual(cpp["anchor"]["context_sha256"], expected_context)
+        self.assertEqual(cpp["anchor"]["context_algorithm"], "line-window-3-v1")
+
+        tidy = by_locator["Diagnostics[0]"]
+        self.assertEqual(tidy["primary_location"], {
+            "file": str(repository / "src/unit-0.cpp"), "line": None, "column": None, "offset": 4,
+        })
+        csa = by_locator["diagnostics[0]"]
+        self.assertEqual(csa["primary_location"], {
+            "file": str(repository / "src/unit-0.cpp"), "line": 1, "column": 1, "offset": None,
+        })
+
+        receipt = json.loads((self.output / "delivery-receipt.json").read_text(encoding="utf-8"))
+        self.assertTrue(any(item["path"] == reference["path"] and item["sha256"] == reference["sha256"]
+                            for item in receipt["files"]))
+        self.assertFalse(any("/content/" in item["path"] for item in receipt["files"]))
+
+    def test_many_diagnostics_in_one_large_header_read_its_snapshot_once(self):
+        repository = self.folder / "many-header-repository"
+        header_relative = "src/vendor/shared-diagnostic.hpp"
+        header_bytes = b"int shared_diagnostic;\n" + b"// padding line\n" * 120_000
+        run = self.make_run(
+            unit_count=1, positive_tidy_units=(), csa_findings=(),
+            repository_root=repository, diagnostic_header=header_relative,
+            diagnostic_header_bytes=header_bytes,
+        )
+        profile = handoff._load_json(self.profile_path, "fixture profile")[0]
+        validated = handoff._validate_run(run, profile)
+        cpp_path = validated["cpp_xml"]
+        xml_root = ET.fromstring(cpp_path.read_bytes())
+        errors = xml_root.find("./errors")
+        self.assertIsNotNone(errors)
+        first_error = errors.find("error")
+        self.assertIsNotNone(first_error)
+        diagnostic_count = 128
+        for _ in range(diagnostic_count - 1):
+            errors.append(copy.deepcopy(first_error))
+        cpp_path.write_bytes(ET.tostring(xml_root, encoding="utf-8"))
+        artifact_digest = _sha(cpp_path.read_bytes())
+        validated["cpp_diagnostics"] = diagnostic_count
+        snapshot_reads = []
+        tracked_checks = []
+        original_read_file = handoff._read_file
+        original_tracked_check = handoff._git_path_is_tracked
+
+        def count_snapshot_reads(path, label, max_bytes=handoff.MAX_FILE_BYTES):
+            if label == "pre-scan source snapshot":
+                snapshot_reads.append(Path(path))
+            return original_read_file(path, label, max_bytes)
+
+        def count_tracked_checks(repository_root, relative_path):
+            tracked_checks.append(relative_path)
+            return original_tracked_check(repository_root, relative_path)
+
+        with patch.object(handoff, "_read_file", side_effect=count_snapshot_reads), \
+             patch.object(handoff, "_git_path_is_tracked", side_effect=count_tracked_checks):
+            sidecar = handoff._native_anchor_rows(
+                validated,
+                [{"tool": "cppcheck", "source": cpp_path, "sha256": artifact_digest}],
+                "fixture-product", profile["repository"],
+            )
+
+        self.assertEqual(len(sidecar["entries"]), diagnostic_count)
+        self.assertEqual(len(snapshot_reads), 1)
+        self.assertEqual(tracked_checks, [header_relative])
+        self.assertEqual(snapshot_reads[0].name, _sha(header_bytes))
+        expected = hashlib.sha256()
+        for line in header_bytes.splitlines(keepends=True)[:4]:
+            expected.update(len(line).to_bytes(8, "big"))
+            expected.update(line)
+        expected_digest = expected.hexdigest()
+        self.assertTrue(all(entry["anchor"]["status"] == "available" for entry in sidecar["entries"]))
+        self.assertTrue(all(entry["anchor"]["context_sha256"] == expected_digest
+                            for entry in sidecar["entries"]))
+
+    def test_batched_line_windows_and_offsets_match_the_original_byte_protocol(self):
+        for raw in (b"", b"one\ntwo\nthree\n", b"one\r\ntwo\nthree", b"one\rtwo\r", b"last line"):
+            lines = []
+            start = 0
+            for index, byte in enumerate(raw):
+                if byte == 10:
+                    lines.append(raw[start:index + 1])
+                    start = index + 1
+            if start < len(raw) or not lines:
+                lines.append(raw[start:])
+
+            target_lines = list(range(-1, len(lines) + 3))
+            actual = handoff._line_window_sha256_many(raw, target_lines)
+            expected = {}
+            for line_number in target_lines:
+                if line_number < 1:
+                    continue
+                if line_number > len(lines):
+                    expected[line_number] = None
+                    continue
+                digest = hashlib.sha256()
+                for line in lines[max(0, line_number - 4):line_number + 3]:
+                    digest.update(len(line).to_bytes(8, "big"))
+                    digest.update(line)
+                expected[line_number] = digest.hexdigest()
+            self.assertEqual(actual, expected)
+
+            offsets = list(range(len(raw) + 2))
+            self.assertEqual(
+                handoff._source_lines_for_offsets(raw, offsets),
+                {offset: handoff._source_line_for_offset(raw, offset) for offset in offsets},
+            )
+
+    def test_diagnostic_anchor_sidecar_is_present_for_a_zero_finding_delivery(self):
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=())
+        handoff.export_run(self.profile_path, root, self.output)
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        sidecar = json.loads((self.output / manifest["diagnostic_anchors"]["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(sidecar["entries"], [])
+
+    def test_csa_anchor_parsing_matches_adapter_when_plist_files_array_is_omitted(self):
+        repository = self.folder / "csa-no-files-repository"
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=(0,), repository_root=repository)
+        unit = str(repository / "src/unit-0.cpp")
+        plist_path = root / "group-1/evidence-bundle/05-clang-static-analyzer/result/csa-native" / (
+            hashlib.sha256(unit.encode()).hexdigest()[:20] + ".plist"
+        )
+        plist = plistlib.loads(plist_path.read_bytes())
+        plist.pop("files", None)
+        plist["diagnostics"][0]["location"]["file"] = unit
+        plist_path.write_bytes(plistlib.dumps(plist))
+        relative = plist_path.relative_to(root / "group-1/evidence-bundle").as_posix()
+        _rebind_evidence_artifact(root, relative)
+
+        handoff.export_run(self.profile_path, root, self.output)
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        sidecar = json.loads((self.output / manifest["diagnostic_anchors"]["path"]).read_text(encoding="utf-8"))
+        csa = next(item for item in sidecar["entries"] if item["locator"] == "diagnostics[0]")
+        self.assertEqual(csa["primary_location"], {
+            "file": unit, "line": 1, "column": 1, "offset": None,
+        })
+        self.assertEqual(csa["anchor"]["status"], "available")
+        self.assertEqual(csa["anchor"]["repository_path"], "src/unit-0.cpp")
+
+    def test_diagnostic_anchor_sidecar_marks_relative_cppcheck_path_unavailable(self):
+        repository = self.folder / "relative-cppcheck-repository"
+        header_relative = "src/vendor/diagnostic.hpp"
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=(),
+                             repository_root=repository, diagnostic_header=header_relative)
+        xml_path = root / "group-1/evidence-bundle/03-cppcheck/result/cppcheck-compile-report.xml"
+        xml = xml_path.read_text(encoding="utf-8").replace(str(repository / header_relative), header_relative)
+        xml_path.write_text(xml, encoding="utf-8")
+        _rebind_evidence_artifact(root, "03-cppcheck/result/cppcheck-compile-report.xml")
+        handoff.export_run(self.profile_path, root, self.output)
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        sidecar = json.loads((self.output / manifest["diagnostic_anchors"]["path"]).read_text(encoding="utf-8"))
+        cpp = next(item for item in sidecar["entries"] if item["locator"] == "errors.error[0]")
+        self.assertEqual(cpp["primary_location"]["file"], header_relative)
+        self.assertEqual(cpp["anchor"], {"status": "unavailable", "reason": "relative-path-without-captured-base"})
+
+    def test_diagnostic_anchor_sidecar_marks_changed_dependency_inventory_unavailable(self):
+        repository = self.folder / "changed-dependency-repository"
+        root = self.make_run(unit_count=1, positive_tidy_units=(0,), csa_findings=(), repository_root=repository)
+        run_manifest_path = root / "manifest.json"
+        run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
+        after = run_manifest["groups"][0]["input_baseline_after"]
+        first_path = next(iter(after["files"]))
+        after["files"][first_path] = "f" * 64
+        _write_json(run_manifest_path, run_manifest)
+        handoff.export_run(self.profile_path, root, self.output)
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        sidecar = json.loads((self.output / manifest["diagnostic_anchors"]["path"]).read_text(encoding="utf-8"))
+        self.assertTrue(sidecar["entries"])
+        self.assertTrue(all(item["anchor"] == {"status": "unavailable", "reason": "postscan-inputs-changed"}
+                            for item in sidecar["entries"]))
+
+    def test_diagnostic_anchor_duplicate_artifact_locator_is_never_assigned_an_anchor(self):
+        repository = self.folder / "duplicate-anchor-repository"
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=(),
+                             repository_root=repository, diagnostic_header="src/vendor/diagnostic.hpp")
+        profile = handoff._load_json(self.profile_path, "fixture profile")[0]
+        validated = handoff._validate_run(root, profile)
+        cpp_path = validated["cpp_xml"]
+        digest = _sha(cpp_path.read_bytes())
+        validated["cpp_diagnostics"] = 2
+        sidecar = handoff._native_anchor_rows(validated, [
+            {"tool": "cppcheck", "source": cpp_path, "sha256": digest},
+            {"tool": "cppcheck", "source": cpp_path, "sha256": digest},
+        ], "fixture-product", profile["repository"])
+        self.assertEqual(len(sidecar["entries"]), 2)
+        self.assertEqual(sidecar["entries"][0]["artifact_sha256"], sidecar["entries"][1]["artifact_sha256"])
+        self.assertEqual(sidecar["entries"][0]["locator"], sidecar["entries"][1]["locator"])
+        self.assertEqual(sidecar["entries"][0]["primary_location"], sidecar["entries"][1]["primary_location"])
+        self.assertTrue(all(item["anchor"] == {"status": "unavailable", "reason": "duplicate-artifact-digest"}
+                            for item in sidecar["entries"]))
+
+    def test_diagnostic_anchor_snapshot_tampering_only_disables_anchor(self):
+        repository = self.folder / "tampered-anchor-repository"
+        root = self.make_run(unit_count=1, positive_tidy_units=(0,), csa_findings=(), repository_root=repository)
+        evidence_root = root / "group-1/evidence-bundle"
+        baseline = json.loads((evidence_root / "01-metadata/input-baseline/before/baseline.json").read_text())
+        snapshot_digest = next(iter(baseline["snapshots"]))
+        snapshot_relative = "01-metadata/input-baseline/before/content/" + snapshot_digest
+        snapshot_path = evidence_root / snapshot_relative
+        snapshot_path.write_bytes(b"tampered source snapshot\n")
+        _rebind_evidence_artifact(root, snapshot_relative)
+        handoff.export_run(self.profile_path, root, self.output)
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        sidecar = json.loads((self.output / manifest["diagnostic_anchors"]["path"]).read_text(encoding="utf-8"))
+        self.assertTrue(sidecar["entries"])
+        self.assertTrue(all(item["anchor"] == {"status": "unavailable", "reason": "snapshot-hash-mismatch"}
+                            for item in sidecar["entries"]))
+
+    def test_checked_zip_rejects_unbound_diagnostic_anchor_reference(self):
+        root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=())
+        handoff.export_run(self.profile_path, root, self.output)
+        manifest_path = self.output / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["diagnostic_anchors"]["sha256"] = "f" * 64
+        _write_json(manifest_path, manifest)
+        receipt_path = self.output / "delivery-receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        manifest_record = next(item for item in receipt["files"] if item["path"] == "manifest.json")
+        manifest_record["sha256"] = _sha(manifest_path.read_bytes())
+        manifest_record["size"] = manifest_path.stat().st_size
+        receipt["manifest"] = {"path": "manifest.json", **manifest_record}
+        _write_json(receipt_path, receipt)
+        with self.assertRaisesRegex(deliver.DeliveryError, "diagnostic anchor reference"):
+            deliver.package_delivery(self.output, self.folder / "unbound-anchors.zip")
 
     def test_all_zero_tidy_target_has_typed_zero_receipt_but_no_yaml_artifact(self):
         root = self.make_run(unit_count=1, positive_tidy_units=(), csa_findings=())

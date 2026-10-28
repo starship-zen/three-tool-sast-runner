@@ -323,6 +323,33 @@ def _delivery_inventory(bundle_path: str | Path) -> dict[str, dict[str, Any]]:
     }:
         raise DeliveryError("delivery receipt does not bind the root manifest", stage="zip", exit_code=4)
 
+    anchor_reference = manifest.get("diagnostic_anchors")
+    if anchor_reference is not None:
+        if (not isinstance(anchor_reference, dict) or set(anchor_reference) != {"path", "sha256"}
+                or not isinstance(anchor_reference.get("sha256"), str)
+                or not handoff.SHA_RE.fullmatch(anchor_reference["sha256"])):
+            raise DeliveryError("diagnostic anchor reference is invalid", stage="zip", exit_code=4)
+        try:
+            anchor_path = _archive_name(anchor_reference.get("path"))
+        except DeliveryError as error:
+            raise DeliveryError("diagnostic anchor reference path is invalid", stage="zip", exit_code=4) from error
+        if (anchor_path in {"manifest.json", "delivery-receipt.json"}
+                or anchor_path not in inventory
+                or inventory[anchor_path]["sha256"] != anchor_reference["sha256"]):
+            raise DeliveryError("diagnostic anchor reference is not bound to a delivery member", stage="zip", exit_code=4)
+        try:
+            anchors, _ = handoff._load_json(root / anchor_path, "diagnostic anchor sidecar", handoff.MAX_NATIVE_BYTES)
+        except handoff.HandoffError as error:
+            raise DeliveryError("diagnostic anchor sidecar is invalid", stage="zip", exit_code=4) from error
+        if (anchors.get("schema_version") != "diagnostic-anchors-1.0"
+                or anchors.get("product_id") != manifest.get("project", {}).get("product_id")
+                or anchors.get("source") != {
+                    "repository": manifest.get("source", {}).get("repository"),
+                    "commit": manifest.get("source", {}).get("commit"),
+                }
+                or not isinstance(anchors.get("entries"), list)):
+            raise DeliveryError("diagnostic anchor sidecar identity differs from its delivery", stage="zip", exit_code=4)
+
     receipt_path = root / "delivery-receipt.json"
     try:
         receipt_hash, receipt_size = handoff._sha256_file(receipt_path, "delivery receipt", MAX_MEMBER_BYTES)

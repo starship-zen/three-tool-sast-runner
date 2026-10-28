@@ -94,6 +94,8 @@ uv run --frozen --offline python scan/deliver.py \
 
 ZIP 在归档根目录包含 `manifest.json`、`delivery-receipt.json` 和收据绑定的文件，不增加外层目录。Runner 在交付前逐项复核收据中的大小和 SHA-256、ZIP 成员集合、ZIP 内字节以及当前接收端的文件数/大小限制。不要手工编辑、重打包或从 ZIP 中删文件。
 
+正式导出还会在清单中引用 `provenance/diagnostic-anchors.json`，对每条原生诊断的文件哈希、定位符、主位置及可用源码上下文摘要进行绑定。摘要只从已有 pre-scan 依赖快照计算；合格头文件也能纳入，旁文件不包含源码正文。缺少可信路径或快照时会记录不可用原因，不要自行补路径或编辑旁文件。该侧车用于报告端在显式扫描基线下关联多次扫描，不替代工具原始结果、人工审核或报告签发。算法边界见[技术规范](SPEC.zh-CN.md) §7.2。
+
 ## 4. 实际产品扫描与交付
 
 先在产品方批准的干净 Git checkout 中完成该产品正常构建，并为**本次源码提交与配置**生成新的 `compile_commands.json`。CMake 项目可按批准的配置执行：
