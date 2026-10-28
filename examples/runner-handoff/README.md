@@ -65,3 +65,18 @@ and matching `native-diagnostic-log` provenance. A receiver can use an unambiguo
 warning to corroborate line/column without accessing the original source.
 The logs do not replace YAML, alter counts or prove authenticated execution;
 older deliveries without these references cannot promise equivalent locations.
+
+The formal exporter adds the optional, hash-bound `diagnostic_anchors`
+reference and `diagnostic-anchors-1.0` sidecar. It binds every parsed native
+record by raw artifact SHA-256, native locator and exact primary location.
+An available source anchor comes only from the existing verified pre-scan
+dependency snapshot, after dependency paths/content and environment agree with
+the post-scan receipt; this includes eligible headers without copying source
+bodies into the delivery. `line-window-3-v1` hashes up to three raw LF-delimited
+lines on each side of the diagnostic line, with each line length-prefixed by an
+8-byte big-endian integer. Clang-Tidy offsets use the selected TU's captured
+compile directory. Relative Cppcheck paths, external or untracked files,
+symlinked or ambiguous paths, missing snapshots and invalid coordinates remain
+explicitly unavailable. The evidence is pre/post-consistent, not proof of the
+exact bytes read by the analyzer. Older formal deliveries without this
+reference remain compatible and do not gain content-level anchors.

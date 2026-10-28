@@ -875,6 +875,453 @@ def _git_path_is_tracked(repository_root: Path, relative_path: str) -> bool:
         return False
 
 
+def _native_optional_int(value: Any, label: str) -> int | None:
+    """Mirror the report adapter's integer handling for native locations."""
+    if value is None:
+        return None
+    if type(value) is int:
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"\d+", value):
+        parsed = int(value)
+    else:
+        raise HandoffError("native diagnostic has an invalid " + label)
+    if parsed < 0:
+        raise HandoffError("native diagnostic has an invalid " + label)
+    return parsed
+
+
+def _primary_location_record(value: Any) -> dict[str, Any] | None:
+    """Return the exact location shape exposed by the downstream native adapter."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise HandoffError("native diagnostic primary location is invalid")
+    file_value = value.get("file")
+    if file_value is not None and not isinstance(file_value, str):
+        raise HandoffError("native diagnostic primary file is invalid")
+    return {
+        "file": file_value,
+        "line": _native_optional_int(value.get("line"), "line"),
+        "column": _native_optional_int(value.get("column"), "column"),
+        "offset": _native_optional_int(value.get("offset"), "offset"),
+    }
+
+
+def _line_window_sha256_many(raw: bytes, line_numbers: list[int]) -> dict[int, str | None]:
+    """Hash requested LF-delimited windows in one pass with a seven-line buffer."""
+    targets = sorted({line for line in line_numbers if type(line) is int and line >= 1})
+    results: dict[int, str | None] = {}
+    if not targets:
+        return results
+
+    def line_spans():
+        if not raw:
+            yield 1, 0, 0
+            return
+        start = 0
+        line_number = 1
+        while start < len(raw):
+            newline = raw.find(b"\n", start)
+            end = len(raw) if newline < 0 else newline + 1
+            yield line_number, start, end
+            start = end
+            line_number += 1
+
+    view = memoryview(raw)
+    window: list[tuple[int, int, int]] = []
+    target_index = 0
+    line_count = 0
+
+    def hash_window(target: int) -> str:
+        digest = hashlib.sha256()
+        first_line = max(1, target - 3)
+        last_line = target + 3
+        for number, start, end in window:
+            if first_line <= number <= last_line:
+                digest.update((end - start).to_bytes(8, "big"))
+                digest.update(view[start:end])
+        return digest.hexdigest()
+
+    for line_count, start, end in line_spans():
+        window.append((line_count, start, end))
+        if len(window) > 7:
+            del window[0]
+        while target_index < len(targets) and targets[target_index] + 3 <= line_count:
+            target = targets[target_index]
+            results[target] = hash_window(target)
+            target_index += 1
+
+    while target_index < len(targets):
+        target = targets[target_index]
+        results[target] = hash_window(target) if target <= line_count else None
+        target_index += 1
+    return results
+
+
+def _line_window_sha256(raw: bytes, line_number: int) -> str | None:
+    """Compatibility helper using the exact versioned window encoding."""
+    if type(line_number) is not int or line_number < 1:
+        return None
+    return _line_window_sha256_many(raw, [line_number]).get(line_number)
+
+
+def _source_line_for_offset(raw: bytes, offset: int) -> int | None:
+    if type(offset) is not int or offset < 0 or offset > len(raw):
+        return None
+    return raw[:offset].count(b"\n") + 1
+
+
+def _source_lines_for_offsets(raw: bytes, offsets: list[int]) -> dict[int, int | None]:
+    """Map sorted byte offsets to LF-based line numbers with one forward scan."""
+    results: dict[int, int | None] = {}
+    line_number = 1
+    cursor = 0
+    for offset in sorted(set(offsets)):
+        if type(offset) is not int or offset < 0 or offset > len(raw):
+            results[offset] = None
+            continue
+        if not raw:
+            results[offset] = 1 if offset == 0 else None
+            continue
+        while True:
+            newline = raw.find(b"\n", cursor, offset)
+            if newline < 0:
+                break
+            line_number += 1
+            cursor = newline + 1
+        results[offset] = line_number
+    return results
+
+
+def _captured_source_snapshots(validated: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Load the already verified pre-scan dependency snapshot inventory."""
+    group = validated["group"]
+    before = group.get("input_baseline")
+    after = group.get("input_baseline_after")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return None, "pre-scan-snapshot-unavailable"
+    if before.get("ok") is not True or after.get("ok") is not True:
+        return None, "pre-scan-snapshot-unavailable"
+    if before.get("errors") != [] or after.get("errors") != []:
+        return None, "pre-scan-snapshot-unavailable"
+    if any(before.get(key) != after.get(key) for key in ("files", "resolved_paths", "environment")):
+        return None, "postscan-inputs-changed"
+
+    baseline_relative = "01-metadata/input-baseline/before/baseline.json"
+    baseline_path = validated["evidence_files"].get(baseline_relative)
+    if baseline_path is None:
+        return None, "pre-scan-snapshot-unavailable"
+    try:
+        captured, _ = _load_json(baseline_path, "pre-scan dependency baseline", MAX_JSON_BYTES)
+    except HandoffError:
+        return None, "pre-scan-snapshot-unavailable"
+    if captured != before:
+        return None, "pre-scan-snapshot-unavailable"
+
+    files = before.get("files")
+    resolved_paths = before.get("resolved_paths")
+    snapshots = before.get("snapshots")
+    if not isinstance(files, dict) or not isinstance(resolved_paths, dict) or not isinstance(snapshots, dict):
+        return None, "pre-scan-snapshot-unavailable"
+    if set(files) != set(resolved_paths):
+        return None, "pre-scan-snapshot-unavailable"
+    if any(not isinstance(path, str) or not Path(path).is_absolute()
+           or not isinstance(resolved_paths.get(path), str) or not Path(resolved_paths[path]).is_absolute()
+           or not isinstance(digest, str) or not SHA_RE.fullmatch(digest)
+           for path, digest in files.items()):
+        return None, "pre-scan-snapshot-unavailable"
+    for digest, relative in snapshots.items():
+        if (not isinstance(digest, str) or not SHA_RE.fullmatch(digest)
+                or relative != "content/" + digest):
+            return None, "pre-scan-snapshot-unavailable"
+    return {"files": files, "resolved_paths": resolved_paths, "snapshots": snapshots}, ""
+
+
+def _snapshot_anchor_request_for_location(
+    validated: dict[str, Any],
+    snapshots: dict[str, Any] | None,
+    unavailable_reason: str,
+    location: dict[str, Any] | None,
+    base: Path | None,
+    repository_ready: bool,
+    source_cache: dict[tuple[str, str | None], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if location is None:
+        return {"status": "unavailable", "reason": "no-primary-location"}
+    native_path = location.get("file")
+    if not isinstance(native_path, str) or not native_path:
+        return {"status": "unavailable", "reason": "no-primary-file"}
+
+    cache_key = (native_path, str(base) if base is not None else None)
+
+    def remember(result: dict[str, Any]) -> dict[str, Any]:
+        if source_cache is not None:
+            source_cache[cache_key] = {
+                key: value for key, value in result.items() if key not in {"line", "offset"}
+            }
+        if result.get("status") == "pending":
+            return {**result, "line": location.get("line"), "offset": location.get("offset")}
+        return result
+
+    if source_cache is not None and cache_key in source_cache:
+        cached = source_cache[cache_key]
+        if cached.get("status") == "pending":
+            return {**cached, "line": location.get("line"), "offset": location.get("offset")}
+        return dict(cached)
+    if not repository_ready:
+        return remember({"status": "unavailable", "reason": "repository-identity-unverified"})
+    if snapshots is None:
+        return remember({"status": "unavailable", "reason": unavailable_reason})
+    if ("\\" in native_path or "\x00" in native_path
+            or any(ord(char) < 32 for char in native_path)):
+        return remember({"status": "unavailable", "reason": "unsafe-native-path"})
+    candidate = Path(native_path)
+    if not candidate.is_absolute():
+        if base is None:
+            return remember({"status": "unavailable", "reason": "relative-path-without-captured-base"})
+        candidate = base / candidate
+    try:
+        _reject_symlink_components(candidate, "diagnostic source")
+    except HandoffError:
+        # A missing path and a symlink are intentionally distinct limitations.
+        try:
+            for parent in (candidate, *candidate.parents):
+                if parent.exists() or parent.is_symlink():
+                    if parent.is_symlink():
+                        return remember({"status": "unavailable", "reason": "symbolic-link-path"})
+        except OSError:
+            pass
+        return remember({"status": "unavailable", "reason": "path-not-found"})
+    try:
+        resolved = candidate.resolve(strict=True)
+        root = Path(validated["repository_root"]).resolve(strict=True)
+        relative_path = resolved.relative_to(root).as_posix()
+    except (OSError, RuntimeError):
+        return remember({"status": "unavailable", "reason": "path-not-found"})
+    except ValueError:
+        return remember({"status": "unavailable", "reason": "outside-repository"})
+    if (not relative_path or "\\" in relative_path or "\x00" in relative_path
+            or any(ord(char) < 32 for char in relative_path)
+            or any(part in {"", ".", ".."} for part in relative_path.split("/"))):
+        return remember({"status": "unavailable", "reason": "unsafe-native-path"})
+    repository_root = Path(validated["repository_root"])
+    if not _git_path_is_tracked(repository_root, relative_path):
+        return remember({"status": "unavailable", "reason": "untracked-file"})
+
+    matches = [path for path, resolved_path in snapshots["resolved_paths"].items()
+               if resolved_path == str(resolved)]
+    if not matches:
+        return remember({"status": "unavailable", "reason": "not-in-dependency-snapshot"})
+    if len(matches) != 1:
+        return remember({"status": "unavailable", "reason": "ambiguous-snapshot-identity"})
+    captured_path = matches[0]
+    file_digest = snapshots["files"].get(captured_path)
+    snapshot_relative = snapshots["snapshots"].get(file_digest)
+    if not isinstance(file_digest, str) or not SHA_RE.fullmatch(file_digest) or not snapshot_relative:
+        return remember({"status": "unavailable", "reason": "snapshot-missing"})
+    evidence_relative = "01-metadata/input-baseline/before/" + snapshot_relative
+    snapshot_path = validated["evidence_files"].get(evidence_relative)
+    if snapshot_path is None:
+        return remember({"status": "unavailable", "reason": "snapshot-missing"})
+    if validated["evidence_hashes"].get(evidence_relative) != file_digest:
+        return remember({"status": "unavailable", "reason": "snapshot-hash-mismatch"})
+    return remember({
+        "status": "pending",
+        "repository_path": relative_path,
+        "file_sha256": file_digest,
+        "context_algorithm": "line-window-3-v1",
+        "snapshot_path": snapshot_path,
+    })
+
+
+def _native_anchor_rows(validated: dict[str, Any], artifact_sources: list[dict[str, Any]],
+                        product_id: str, repository: str) -> dict[str, Any]:
+    """Build hash-bound native locator anchors without copying source contents."""
+    snapshots, snapshot_reason = _captured_source_snapshots(validated)
+    repository_ready = _git_checkout_matches_commit(Path(validated["repository_root"]), validated["commit"])
+    compile_directories = _selected_compile_directories(validated)
+    rows: list[dict[str, Any]] = []
+    anchor_groups: dict[Path, list[tuple[int, dict[str, Any]]]] = {}
+    source_requests_cache: dict[tuple[str, str | None], dict[str, Any]] = {}
+    parsed_counts = {tool: 0 for tool in TOOLS}
+    for artifact in artifact_sources:
+        raw = _read_file(artifact["source"], "native diagnostic artifact", MAX_NATIVE_BYTES)
+        if _sha256_bytes(raw) != artifact["sha256"]:
+            raise HandoffError("native diagnostic artifact hash changed before anchor generation")
+        tool = artifact["tool"]
+        records: list[tuple[str, dict[str, Any] | None, Path | None]] = []
+        if tool == "cppcheck":
+            try:
+                xml_root = ET.fromstring(raw)
+            except ET.ParseError as error:
+                raise HandoffError("Cppcheck native XML cannot be parsed for diagnostic anchors") from error
+            errors = xml_root.find("./errors")
+            if errors is None:
+                raise HandoffError("Cppcheck native XML has no errors node for diagnostic anchors")
+            for index, error in enumerate(errors.findall("error")):
+                locations = list(error.iter("location"))
+                native = None
+                if locations:
+                    first = locations[0]
+                    native = {
+                        "file": first.get("file") or first.get("file0"),
+                        "line": first.get("line"),
+                        "column": first.get("column"),
+                        "offset": None,
+                    }
+                location = _primary_location_record(native)
+                records.append((f"errors.error[{index}]", location, None))
+        elif tool == "clang-tidy":
+            try:
+                import yaml
+                document = yaml.safe_load(raw)
+            except Exception as error:
+                raise HandoffError("clang-tidy native YAML cannot be parsed for diagnostic anchors") from error
+            if not isinstance(document, dict) or not isinstance(document.get("Diagnostics"), list):
+                raise HandoffError("clang-tidy native YAML has no diagnostics array for anchors")
+            unit = artifact.get("analysis_unit")
+            base = compile_directories.get(unit)
+            if base is None:
+                raise HandoffError("clang-tidy compile directory is unavailable for diagnostic anchors")
+            for index, diagnostic in enumerate(document["Diagnostics"]):
+                if not isinstance(diagnostic, dict):
+                    raise HandoffError("clang-tidy native diagnostic is invalid for anchors")
+                primary = diagnostic.get("DiagnosticMessage", diagnostic)
+                if not isinstance(primary, dict):
+                    raise HandoffError("clang-tidy native primary location is invalid for anchors")
+                has_location = primary.get("FilePath") is not None or primary.get("FileOffset") is not None
+                native = ({
+                    "file": primary.get("FilePath"), "line": None, "column": None,
+                    "offset": primary.get("FileOffset"),
+                } if has_location else None)
+                location = _primary_location_record(native)
+                records.append((f"Diagnostics[{index}]", location, base))
+        elif tool == "clang-static-analyzer":
+            try:
+                plist = plistlib.loads(raw)
+            except (plistlib.InvalidFileException, ValueError, OverflowError, RecursionError) as error:
+                raise HandoffError("CSA native plist cannot be parsed for diagnostic anchors") from error
+            files = plist.get("files", []) if isinstance(plist, dict) else None
+            diagnostics = plist.get("diagnostics") if isinstance(plist, dict) else None
+            if not isinstance(files, list) or not isinstance(diagnostics, list):
+                raise HandoffError("CSA native plist lacks files or diagnostics for anchors")
+            unit = artifact.get("analysis_unit")
+            base = compile_directories.get(unit)
+            for index, diagnostic in enumerate(diagnostics):
+                if not isinstance(diagnostic, dict):
+                    raise HandoffError("CSA native diagnostic is invalid for anchors")
+                native = None
+                location_node = diagnostic.get("location")
+                if location_node is not None:
+                    if not isinstance(location_node, dict):
+                        raise HandoffError("CSA native primary location is invalid for anchors")
+                    file_value = location_node.get("file")
+                    if type(file_value) is int:
+                        if file_value < 0 or file_value >= len(files) or not isinstance(files[file_value], str):
+                            raise HandoffError("CSA native file index is invalid for diagnostic anchors")
+                        file_value = files[file_value]
+                    elif file_value is not None and not isinstance(file_value, str):
+                        raise HandoffError("CSA native primary file is invalid for anchors")
+                    native = {
+                        "file": file_value,
+                        "line": location_node.get("line"),
+                        "column": location_node.get("col", location_node.get("column")),
+                        "offset": location_node.get("offset"),
+                    }
+                location = _primary_location_record(native)
+                records.append((f"diagnostics[{index}]", location, base))
+        else:
+            raise HandoffError("unsupported native diagnostic artifact for anchors")
+
+        for locator, location, base in records:
+            row_index = len(rows)
+            row = {
+                "artifact_sha256": artifact["sha256"],
+                "locator": locator,
+                "primary_location": location,
+            }
+            request = _snapshot_anchor_request_for_location(
+                    validated, snapshots, snapshot_reason, location, base, repository_ready,
+                    source_requests_cache,
+            )
+            row["anchor"] = request if request.get("status") != "pending" else {"status": "pending"}
+            rows.append(row)
+            if request.get("status") == "pending":
+                anchor_groups.setdefault(request["snapshot_path"], []).append((row_index, request))
+        parsed_counts[tool] += len(records)
+
+    expected_tidy_count = validated["tidy_summary"].get("warnings", {}).get("raw_total")
+    if (parsed_counts["cppcheck"] != validated["cpp_diagnostics"]
+            or parsed_counts["clang-static-analyzer"] != validated["csa_diagnostics"]
+            or parsed_counts["clang-tidy"] != expected_tidy_count):
+        raise HandoffError("diagnostic anchor rows do not reconcile with native scanner counts")
+
+    key_counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        key = (row["artifact_sha256"], row["locator"])
+        key_counts[key] = key_counts.get(key, 0) + 1
+    for row in rows:
+        if key_counts[(row["artifact_sha256"], row["locator"])] > 1:
+            row["anchor"] = {"status": "unavailable", "reason": "duplicate-artifact-digest"}
+
+    # Resolve all diagnostic windows for one captured snapshot before releasing
+    # its bytes. This keeps source memory bounded to one file per export and
+    # avoids rereading/re-splitting a large shared header for every finding.
+    for snapshot_path, requests in anchor_groups.items():
+        active = [(row_index, request) for row_index, request in requests
+                  if rows[row_index]["anchor"].get("status") == "pending"]
+        if not active:
+            continue
+        try:
+            source_bytes = _read_file(snapshot_path, "pre-scan source snapshot", MAX_FILE_BYTES)
+        except HandoffError as error:
+            reason = "oversized-source" if "maximum supported file size" in str(error) else "snapshot-missing"
+            for row_index, _request in active:
+                rows[row_index]["anchor"] = {"status": "unavailable", "reason": reason}
+            continue
+
+        expected_digest = active[0][1]["file_sha256"]
+        if _sha256_bytes(source_bytes) != expected_digest:
+            for row_index, _request in active:
+                rows[row_index]["anchor"] = {"status": "unavailable", "reason": "snapshot-hash-mismatch"}
+            continue
+
+        offsets = [request["offset"] for _row_index, request in active if request["offset"] is not None]
+        offset_lines = _source_lines_for_offsets(source_bytes, offsets)
+        request_lines: list[int] = []
+        for _row_index, request in active:
+            line_number = offset_lines.get(request["offset"]) if request["offset"] is not None else request["line"]
+            if type(line_number) is int and line_number >= 1:
+                request_lines.append(line_number)
+        context_digests = _line_window_sha256_many(source_bytes, request_lines)
+        for row_index, request in active:
+            line_number = offset_lines.get(request["offset"]) if request["offset"] is not None else request["line"]
+            context_digest = context_digests.get(line_number) if type(line_number) is int else None
+            if context_digest is None:
+                rows[row_index]["anchor"] = {"status": "unavailable", "reason": "coordinate-out-of-range"}
+            else:
+                rows[row_index]["anchor"] = {
+                    "status": "available",
+                    "repository_path": request["repository_path"],
+                    "file_sha256": request["file_sha256"],
+                    "context_sha256": context_digest,
+                    "context_algorithm": request["context_algorithm"],
+                }
+
+    if any(row["anchor"].get("status") == "pending" for row in rows):
+        raise HandoffError("diagnostic anchor snapshot requests were not resolved")
+    if repository_ready and not _git_checkout_matches_commit(Path(validated["repository_root"]), validated["commit"]):
+        for row in rows:
+            if row["anchor"]["status"] == "available":
+                row["anchor"] = {"status": "unavailable", "reason": "repository-identity-unverified"}
+    return {
+        "schema_version": "diagnostic-anchors-1.0",
+        "product_id": product_id,
+        "source": {"repository": repository, "commit": validated["commit"]},
+        "entries": rows,
+    }
+
+
 def _selected_compile_directories(validated: dict[str, Any]) -> dict[str, Path]:
     """Read the captured selected database for clang-tidy relative locations."""
     try:
@@ -1070,6 +1517,7 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
         configuration = profile_value["configuration"]
         units = validated["selected"]
         versions = validated["version_tokens"]
+        anchor_artifact_sources: list[dict[str, Any]] = []
 
         # Preserve native scanner bytes verbatim and identify each output by
         # its declared scanner, product component, target and source unit.
@@ -1079,9 +1527,16 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
             "format": FORMATS["cppcheck"], "tool_version": versions["cppcheck"],
             "component": component, "configuration": configuration, "target": target_id,
         })
+        anchor_artifact_sources.append({
+            "tool": "cppcheck", "source": validated["cpp_xml"], "sha256": cpp_record["sha256"],
+        })
         for unit, source_relative in validated["tidy_yaml"].items():
             record = copy_evidence(source_relative, "native/clang-tidy/" + hashlib.sha256(unit.encode()).hexdigest()[:20] + ".yaml",
                                    "native-scanner-output", tool="clang-tidy", analysis_unit=unit)
+            anchor_artifact_sources.append({
+                "tool": "clang-tidy", "source": validated["evidence_files"][source_relative],
+                "sha256": record["sha256"], "analysis_unit": unit,
+            })
             logs = []
             for stream, suffix in (("stdout", "out"), ("stderr", "err")):
                 source_log = "04-clang-tidy/result/logs/" + hashlib.sha256(unit.encode()).hexdigest()[:20] + "." + suffix + ".log"
@@ -1105,6 +1560,10 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
                 "format": FORMATS["clang-static-analyzer"], "tool_version": versions["clang-static-analyzer"],
                 "component": component, "configuration": configuration, "target": target_id,
                 "analysis_unit": unit,
+            })
+            anchor_artifact_sources.append({
+                "tool": "clang-static-analyzer", "source": validated["csa_entries"][unit],
+                "sha256": record["sha256"], "analysis_unit": unit,
             })
 
         # Preserve execution receipts, source/build closure, all captured tool
@@ -1265,6 +1724,14 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
         identities = _source_path_identities(validated)
         if identities:
             source["source_path_identities"] = identities
+        anchor_path = "provenance/diagnostic-anchors.json"
+        anchors = _native_anchor_rows(validated, anchor_artifact_sources, product_id,
+                                      profile_value["repository"])
+        anchor_raw = _json_bytes(anchors)
+        if len(anchor_raw) > MAX_NATIVE_BYTES:
+            raise HandoffError("diagnostic anchor sidecar exceeds the maximum supported size")
+        anchor_record = _copy_bytes(stage, anchor_path, anchor_raw)
+        payload_files[anchor_path] = anchor_record
         component_record = {
             "component_id": component,
             "target_id": target_id,
@@ -1293,6 +1760,7 @@ def export_run(profile_path: str | Path, run_path: str | Path, output_path: str 
             "tool_runs": tool_runs,
             "artifacts": artifacts,
             "provenance_inputs": provenance,
+            "diagnostic_anchors": {"path": anchor_record["path"], "sha256": anchor_record["sha256"]},
             "counts": counts,
             "delivery_status": "complete-scan-evidence; no release approval implied",
         }

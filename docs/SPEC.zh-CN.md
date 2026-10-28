@@ -245,6 +245,25 @@ clang-tidy 目标包含零告警单元时，使用以下显式支持证据条目
 
 首个通道仅支持一个组、组件、目标和配置。所有选中 TU 必须符合档案路径/语言范围；多组或失败门禁会被拒绝。包含/排除路径只代表本次扫描范围，不推断自研或第三方归属。绝对选中路径作为不透明分析单元 ID 保留，仓库相对范围另行绑定到 Git 基线。对于能在当前匹配的干净 Git commit 中解析、且受 Git 跟踪的 primary native diagnostic file，导出器可附 `source.source_path_identities`，逐项记录精确 native path、Git 根相对路径与导出时 SHA-256。该身份是导出时的 producer-supplied 声明，不认证工具是否实际读取了同一字节；checkout 不匹配、脏、文件缺失、仓库外或未跟踪时不生成身份，下游保留未知。不会按 basename 猜测，也不会改写原生诊断或其显示 label。原始收据可能暴露主机路径，原生输出可能包含源码片段，转移前须按产品方数据策略处理。该交付是未经认证的扫描证据，不是发布批准。
 
+#### 可选的跨扫描源码锚点
+
+新导出的正式交付会在清单中增加 `diagnostic_anchors: {path, sha256}`，引用
+`diagnostic-anchors-1.0` JSON 旁文件。每个原生诊断记录均有一行，包括没有主位置的记录；
+每行绑定原生文件 SHA-256、原生定位符（`errors.error[i]`、`Diagnostics[i]` 或
+`diagnostics[i]`）及与接收端解析器一致的主位置。XML/YAML/plist 原始字节不变。旧的
+`three-tool-scan-delivery-1.0` 输入可以没有该可选成员。
+
+只有当精确主路径能对应到已有 pre-scan 依赖快照中的受 Git 跟踪文件，且扫描前后的文件、
+解析路径和环境收据一致、被引用的快照通过原 SHA-256 核对时，才生成可用锚点；符合条件的
+头文件也纳入。不会按 basename 猜测。clang-tidy 相对路径使用选中 TU 的已记录编译目录和
+原生字节偏移。Cppcheck 聚合 XML 没有可信的工作目录，因此其相对路径不可用。仓库外、
+未跟踪、符号链接、路径歧义、文件超限或坐标越界等情况均保留为带原因的不可用记录。
+
+`line-window-3-v1` 以诊断行及前后最多各三行组成上下文，按 LF 分割物理行并保留原始
+LF/CR 字节；每行前加 8 字节无符号大端长度后计算 SHA-256。空文件视为一个空行。旁文件
+只保存路径和摘要，不包含源码正文。锚点表示 pre/post 一致的依赖快照，不证明分析器实际
+读取的字节；既有收据也无法发现扫描期间发生后又恢复的临时修改。
+
 ### 7.3 一键式交付与闭环自检（`scan/deliver.py`，2026-10-24）
 
 执行 `uv run --frozen --offline python scan/deliver.py --profile PROFILE --scan-path PATH --result-path RUN_ROOT --output OUTPUT.zip`，提供面向第三方的标准一键交付：

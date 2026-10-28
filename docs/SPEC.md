@@ -303,6 +303,36 @@ native outputs can contain source excerpts; operators must apply their data
 handling policy before transferring a delivery. The delivery remains
 untrusted scanner evidence, not authenticated execution or release approval.
 
+#### Optional cross-rescan source anchors
+
+New formal exports bind `diagnostic_anchors: {path, sha256}` to a
+`diagnostic-anchors-1.0` JSON member. The sidecar contains one record per parsed
+diagnostic in every declared native artifact, including records without a
+primary location. Each row binds the raw native artifact SHA-256, exact native
+locator (`errors.error[i]`, `Diagnostics[i]`, or `diagnostics[i]`) and the
+adapter-equivalent primary location. It does not change native XML/YAML/plist
+bytes. Older `three-tool-scan-delivery-1.0` inputs without the optional member
+remain valid.
+
+An anchor is available only when the primary source path is exact, tracked, and
+resolves to one file in the existing pre-scan dependency inventory; the
+pre/post files, resolved paths and environment must agree, and the referenced
+pre-scan content snapshot must pass its captured SHA-256. This includes eligible
+header files and never guesses by basename. Clang-Tidy relative locations use
+the selected TU's captured compile directory and native byte offset. Relative
+Cppcheck locations have no trusted directory in aggregate XML and are therefore
+unavailable. Other missing, external, untracked, symlinked, ambiguous,
+oversized, or out-of-range paths also carry an unavailable reason.
+
+The `line-window-3-v1` context is up to three physical LF-delimited raw-byte
+lines before the diagnostic line, that line, and up to three following lines.
+Each line chunk retains its LF/CR bytes and is encoded as an 8-byte unsigned
+big-endian length followed by the raw bytes; SHA-256 is taken over the encoded
+chunks. An empty file has one empty chunk. No source body is added to the
+sidecar or delivery. These anchors describe a pre/post-consistent captured
+dependency snapshot, not proof of the analyzer's exact read bytes; the existing
+receipt cannot detect a transient edit restored during the scan.
+
 ### 7.3 One-Step Delivery and Verified Packaging (`scan/deliver.py`, 2026-10-24)
 
 Execute `uv run --frozen --offline python scan/deliver.py --profile PROFILE --scan-path PATH --result-path RUN_ROOT --output OUTPUT.zip` for standard one-step delivery:

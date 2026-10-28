@@ -186,6 +186,29 @@ and source excerpts; apply the product owner's data-handling policy before
 transfer. See [the delivery instructions](examples/runner-handoff/README.md)
 for the exact profile and command.
 
+New exports also include a hash-bound `diagnostic_anchors` reference to
+`provenance/diagnostic-anchors.json` (`diagnostic-anchors-1.0`). The sidecar
+has one row for every parsed diagnostic in each native artifact, including
+records without a source location; each row binds the unchanged artifact SHA-256,
+its native locator, and the parser's exact primary location. Source anchors are
+available only when that exact path resolves to a tracked repository file in
+the existing pre-scan dependency snapshots and the post-scan dependency,
+resolved-path and environment receipts agree. Eligible headers are included.
+Clang-Tidy byte offsets are resolved using the selected TU's captured compile
+directory. Relative Cppcheck paths remain unavailable because its aggregate XML
+does not retain a trusted working directory. Missing, external, untracked,
+symlinked, ambiguous, oversized or out-of-range sources receive an explicit
+unavailable reason; the exporter never guesses by basename.
+
+`line-window-3-v1` hashes raw physical LF-delimited line bytes around the
+diagnostic line (up to three lines before and after), retaining LF/CR bytes and
+prefixing each chunk with its 8-byte big-endian length before SHA-256. The
+sidecar contains only file/context digests and relative paths, never copied
+source bodies. These anchors describe a pre/post-consistent dependency snapshot;
+they do not prove the analyzer read those exact bytes or detect a transient edit
+that was restored during scanning. Older deliveries without the optional
+reference remain readable, but cannot provide these content anchors.
+
 The receiving `sast-report-pipeline` owns canonical `three-tool-input-1.0`
 preparation, frozen taxonomy assets, strict mapping audit, report generation,
 verification and packing. A delivery is not itself a canonical report input,
